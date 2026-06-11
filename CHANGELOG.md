@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.1 — unreleased
+## 0.1.1 — golden-diff, syscall batching & compat fixes (2026-06-11)
 
 ### Golden-diff test suite
 
