@@ -57,7 +57,9 @@ check "reachable threshold met"    0 "$Z" -r 0 -t 100 -x 1 127.0.0.1 192.0.2.9
 check "reachable threshold unmet"  1 "$Z" -r 0 -t 100 -x 2 127.0.0.1 192.0.2.9
 check "fast reachable"             0 "$Z" -t 2000 -X 1 127.0.0.1 192.0.2.9
 check "unknown host exit 2"        2 "$Z" -t 100 nonexistent.invalid.zzz
-check "bad option exit 3"          3 "$Z" --bogus
+# fping's man page says exit 3 for bad arguments, but the binary exits 1
+# on every usage error; we match the binary (see main.zig exit codes).
+check "bad option exit 1"          1 "$Z" --bogus
 check "generate range"             1 "$Z" -g -r 0 -t 100 -u 192.0.2.1 192.0.2.3
 check "icmp timestamp (raw)"       0 "$Z" --icmp-timestamp 127.0.0.1
 
@@ -75,7 +77,7 @@ expect_grep "stdin targets"        "ok-marker-127.0.0.1"         sh -c "printf '
 expect_grep "loop interval report" "xmt/rcv/%loss"               timeout -s INT 1 "$Z" -l -p 150 -Q 0.3 127.0.0.1
 
 check "oiface lo"                  0 "$Z" --oiface lo 127.0.0.1
-check "oiface unknown exit 3"      3 "$Z" --oiface nonexistent0 127.0.0.1
+check "oiface unknown exit 1"      1 "$Z" --oiface nonexistent0 127.0.0.1
 expect_grep "rdns via /etc/hosts"  "localhost"                   "$Z" -n -t 200 127.0.0.1
 expect_grep "iso timestamp"        "^\[[0-9-]*T[0-9:]*[+-]"      "$Z" -c 1 -D --timestamp-format iso 127.0.0.1
 

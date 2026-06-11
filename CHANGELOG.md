@@ -1,5 +1,95 @@
 # Changelog
 
+## 0.1.1 — unreleased
+
+### Golden-diff test suite
+
+New `test/golden.sh` (wired into `scripts/test.sh` and CI): runs zfping and
+a reference fping binary (5.1) with identical arguments in an isolated
+namespace and requires equal exit codes plus byte-identical stdout/stderr
+after masking volatile values (RTTs, timestamps, argv[0]). 35 scenarios.
+
+### Tooling & docs
+
+- `scripts/bench.sh`: reproducible generation of the README performance
+  table (ReleaseSafe build, 2000 loopback + 250 silent targets in an
+  isolated namespace, timed via time(1)).
+- `doc/zfping.8` man page, shipped inside the release tarballs
+  (`scripts/release.sh`).
+- Golden suite covers loop modes: `-l`, `-l -Q` and `-N -l -Q` run for a
+  fixed window, get SIGINTed and are compared with run-phase-dependent
+  counters and wall-clock timestamps masked.
+
+### More compatibility fixes (loop/netdata golden tests)
+
+- `-N` netdata chart ids sanitize non-alphanumeric characters to `_`
+  (`fping.127_0_0_1_packets`, like fping's `add_addr()`); the chart
+  family keeps the display name. Chart titles intentionally match the
+  pinned upstream (`'FPing Packets'`) — fping <= 5.1 still printed
+  `'FPing Packets for host X'`, which upstream later dropped.
+- The netdata chart interval renders like printf `%.0f` (round half to
+  even) instead of truncating (`-Q 1.5` now prints `2`).
+
+### Engine: sendmmsg/recvmmsg syscall batching
+
+- Replies are drained with `recvmmsg`, up to 16 packets per syscall, in
+  every mode (`Socket.recvBatch`).
+- Consecutive due sends are transmitted as one `sendmmsg` batch
+  (`Socket.sendMany`). Batches only form when the global send gap is zero
+  (`-i 0`); with pacing enabled the send path stays one packet per gap by
+  design — net-storm protection is unaffected. Packets the kernel did not
+  accept from a batch are retried via `sendto` for accurate per-packet
+  errno handling.
+- Measured in a netns: 14 targets with `-i 0` now take 1 `sendmmsg` +
+  2 `recvmmsg` syscalls (previously 14 `sendto` + 15 `recvmsg`).
+
+### Fuzzing
+
+- New fuzz targets for the CLI option parser and `-g` target generation,
+  joining the existing ICMP/DNS-response parser fuzz tests; all of them
+  run as smoke tests in every `zig build test`.
+- `scripts/fuzz.sh`: time-boxed `zig build test --fuzz` entry point.
+  Instrumented fuzzing is currently blocked by the pinned toolchain —
+  Zig 0.16.0 fails to compile its own fuzz test runner
+  (`lib/compiler/test_runner.zig`: `*builtin.StackTrace` vs
+  `*debug.StackTrace`). Revisit at the next toolchain bump, then wire a
+  scheduled CI fuzz job.
+
+### Compatibility fixes found by the golden suite
+
+All verified byte-for-byte against fping 5.1 and the pinned upstream source
+(`780ec46`):
+
+- **Usage errors now exit 1, not 3.** fping's man page documents exit 3
+  for invalid arguments, but the binary calls `usage(1)`/`exit(1)` on every
+  usage error; we now match the binary. Unknown options and missing values
+  print fping's optparse-style message (`<argv0>: invalid option -- 'x'` +
+  `see 'fping -h' for usage information`); invalid option values and
+  target-source conflicts dump the usage text to stderr like `usage(1)`.
+- **`-A` combined with `-n`/`-d` prints `name (addr)`** like fping's
+  `add_name()`; `-m` alone no longer forces numeric-address display (it
+  keeps the printname for every resolved address).
+- **Hostname targets pick the same address as fping.** glibc's getaddrinfo
+  sorts results per RFC 6724 (e.g. `::1` before `127.0.0.1` for
+  `localhost`); std's lookup returns file/DNS order, so resolved addresses
+  are now ordered by `fping.netutil.sortByDestinationPolicy` (destination
+  precedence + a UDP-connect route-lookup reachability probe).
+- **`-x`/`-X` suppress per-target alive/unreachable lines** (fping clears
+  `opt_verbose_on` when `opt_min_reachable` is set).
+- **`-c` and `-C` are no longer mutually exclusive** — like fping, both set
+  the probe count (last one wins) and `-C` switches on the verbose RTT
+  table.
+- **`-N` without `-l`/`-Q` is accepted** (fping never validates netdata
+  prerequisites) and no longer suppresses normal output on its own.
+- **Resolver failures print the gai_strerror text** (`Temporary failure in
+  name resolution` vs `Name or service not known`) and are suppressed by
+  `-q`, matching `print_warning()`.
+- **Validation messages mirror fping** (`can't specify both -4 and -6`,
+  `specify only one of c, l`, `option -J, --json requires -c, -C, or -l`,
+  `ICMP Timestamp is IPv4 only`, `can't parse source address: X`,
+  `unknown interface 'X'`), prefixed with argv[0] like upstream's `prog`.
+- `-c`/`-C`/`-x`/`-X` now reject a zero value (upstream `usage(1)`).
+
 ## 0.1.0 — fping-complete-zig-port
 
 First release: fping reimplemented in Zig 0.16 as a reusable library

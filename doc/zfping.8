@@ -1,0 +1,262 @@
+.TH ZFPING 8 "2026-06-11" "zfping 0.1.1" "System Manager's Manual"
+.SH NAME
+zfping \- send ICMP ECHO_REQUEST packets to network hosts (Zig port of fping)
+.SH SYNOPSIS
+.B zfping
+.RI [ options ]
+.RI [ targets ...]
+.SH DESCRIPTION
+.B zfping
+is a pure-Zig, fping-compatible program to send ICMP echo probes to network
+hosts, similar to
+.BR ping (8),
+but performing much better when pinging multiple hosts. Unlike
+.BR ping ,
+.B zfping
+is meant to be used in scripts and monitoring systems, so its output is
+designed to be easy to parse. Options, output formats and exit codes mirror
+.BR fping (8);
+known divergences are documented in the project CHANGELOG.
+.PP
+.B zfping
+moves to the next target after each probe instead of waiting for a reply
+(round-robin), paces all transmissions globally and per subnet, and caps the
+number of outstanding probes \(em it is built for high-volume monitoring
+(10k+ host checks per cycle) without bursting probes into one network branch.
+.PP
+Targets are read from the command line, from a file
+.RB ( \-f ),
+generated from a range or CIDR
+.RB ( \-g ),
+or \(em when none are given \(em from standard input. Targets may be IPv4 or
+IPv6 addresses (including link-local with scope ids, e.g.
+.IR fe80::1%eth0 )
+or host names.
+.SH PROBING OPTIONS
+.TP
+.BR \-4 ", " \-\-ipv4
+Restrict name resolution and pinging to IPv4 addresses.
+.TP
+.BR \-6 ", " \-\-ipv6
+Restrict name resolution and pinging to IPv6 addresses.
+.TP
+.BI \-b\  BYTES \fR,\ \fB\-\-size= BYTES
+Amount of ping data to send, in bytes (default: 56). The IP and ICMP headers
+are added on top.
+.TP
+.BI \-B\  N \fR,\ \fB\-\-backoff= N
+Exponential backoff factor applied to the timeout after each retry
+(default: 1.5).
+.TP
+.BI \-c\  N \fR,\ \fB\-\-count= N
+Count mode: send
+.I N
+pings to each target and report per-target statistics at the end.
+.TP
+.BI \-f\  FILE \fR,\ \fB\-\-file= FILE
+Read the list of targets from a file
+.RI ( \- " means standard input)."
+.TP
+.BR \-g ", " \-\-generate
+Generate the target list from a start/end address pair or a CIDR network
+(e.g. \fBzfping \-g 192.168.1.0 192.168.1.255\fR or
+\fBzfping \-g 192.168.1.0/24\fR). IPv4 prefixes shorter than /31 exclude the
+network and broadcast addresses; at most 131072 targets may be generated.
+.TP
+.BI \-H\  N \fR,\ \fB\-\-ttl= N
+Set the IP TTL (time to live / hop limit) on outgoing probes.
+.TP
+.BI \-i\  MSEC \fR,\ \fB\-\-interval= MSEC
+Minimum interval between any two outgoing packets, in milliseconds
+(default: 10). This is the global send pacing.
+.TP
+.BI \-I\  IFACE \fR,\ \fB\-\-iface= IFACE
+Bind the sockets to a particular interface (SO_BINDTODEVICE; requires
+CAP_NET_RAW).
+.TP
+.BI \-\-oiface= IFACE
+Send probes via a specific outgoing interface (IP_PKTINFO) while accepting
+replies from any interface.
+.TP
+.BI \-k\  FWMARK \fR,\ \fB\-\-fwmark= FWMARK
+Set the routing mark on outgoing packets (requires CAP_NET_ADMIN).
+.TP
+.BR \-l ", " \-\-loop
+Loop mode: send pings forever, until interrupted.
+.TP
+.BR \-m ", " \-\-all
+Use all addresses a hostname resolves to (e.g. IPv4 and IPv6), not just the
+first one. Use together with
+.BR \-A .
+.TP
+.BR \-M ", " \-\-dontfrag
+Set the Don't Fragment flag (path MTU discovery).
+.TP
+.BI \-O\  N \fR,\ \fB\-\-tos= N
+Set the type of service / traffic class on outgoing probes.
+.TP
+.BI \-p\  MSEC \fR,\ \fB\-\-period= MSEC
+Interval between probes to one target in loop and count modes, in
+milliseconds (default: 1000).
+.TP
+.BI \-r\  N \fR,\ \fB\-\-retry= N
+Number of retries before a target is considered unreachable (default: 3).
+.TP
+.BR \-R ", " \-\-random
+Fill the ping payload with random data (to defeat link-layer compression).
+.TP
+.BI \-S\  IP \fR,\ \fB\-\-src= IP
+Set the source address of outgoing probes.
+.TP
+.BI \-\-seqmap\-timeout= MSEC
+Accepted for fping compatibility; this port frees sequence slots when the
+probe timeout fires, so the option has no observable effect.
+.TP
+.BI \-t\  MSEC \fR,\ \fB\-\-timeout= MSEC
+Initial per-probe timeout in milliseconds (default: 500; in loop/count modes
+the
+.B \-p
+period, capped at 2000).
+.TP
+.B \-\-check\-source
+Discard replies whose source address does not match the target address.
+.TP
+.B \-\-icmp\-timestamp
+Send ICMP Timestamp requests (RFC 792) instead of ICMP Echo. IPv4 only;
+requires a raw socket (CAP_NET_RAW or root).
+.SH OUTPUT OPTIONS
+.TP
+.BR \-a ", " \-\-alive
+Show only targets that are alive.
+.TP
+.BR \-A ", " \-\-addr
+Show targets by address. Combined with
+.B \-n
+or
+.BR \-d ,
+targets are shown as "name (address)".
+.TP
+.BI \-C\  N \fR,\ \fB\-\-vcount= N
+Same as
+.BR \-c ,
+but report the individual round-trip times in a per-target table instead of
+summary statistics.
+.TP
+.BR \-d ", " \-\-rdns
+Show targets by name, forcing a reverse-DNS lookup for every target.
+.TP
+.BR \-D ", " \-\-timestamp
+Print a timestamp before each output line.
+.TP
+.BI \-\-timestamp\-format= FORMAT
+Timestamp format for
+.BR \-D :
+.BR ctime ", " iso " or " rfc3339
+(default: Unix epoch seconds).
+.TP
+.BR \-e ", " \-\-elapsed
+Show the elapsed (round-trip) time on returned packets.
+.TP
+.BR \-J ", " \-\-json
+Output results in JSON format (requires
+.BR \-c ", " \-C " or " \-l ).
+.TP
+.BR \-n ", " \-\-name
+Show targets by name: numeric targets are reverse-resolved, host names are
+kept as given.
+.TP
+.BR \-N ", " \-\-netdata
+Output in netdata chart format (use with
+.BR \-l " and " \-Q ).
+.TP
+.BR \-o ", " \-\-outage
+Show the accumulated outage time (lost packets \(mu packet interval).
+.TP
+.BR \-q ", " \-\-quiet
+Quiet: suppress per-target/per-probe results, print only final summaries.
+.TP
+.BI \-Q\  SECS \fR[\fB,cumulative\fR],\ \fB\-\-squiet= SECS \fR[\fB,cumulative\fR]
+Like
+.BR \-q ,
+but print an interval summary every
+.I SECS
+seconds. With
+.BR cumulative ,
+statistics count from the beginning instead of per interval.
+.TP
+.BR \-s ", " \-\-stats
+Print cumulative statistics for the whole run.
+.TP
+.BR \-u ", " \-\-unreach
+Show only targets that are unreachable.
+.TP
+.BR \-v ", " \-\-version
+Show version information.
+.TP
+.BI \-x\  N \fR,\ \fB\-\-reachable= N
+Report whether at least
+.I N
+hosts are reachable; the exit status reflects the result.
+.TP
+.BI \-X\  N \fR,\ \fB\-\-fast\-reachable= N
+Exit immediately with success as soon as
+.I N
+hosts have answered.
+.TP
+.B \-\-print\-tos
+Show the received TOS / traffic class value.
+.TP
+.B \-\-print\-ttl
+Show the received TTL / hop limit value.
+.TP
+.BR \-h ", " \-\-help
+Show usage information.
+.SH EXIT CODES
+.TP
+.B 0
+All targets (or at least the number requested with
+.BR \-x / \-X )
+are reachable.
+.TP
+.B 1
+Some targets were unreachable, or a usage error occurred. (fping documents
+exit 3 for invalid arguments, but its binary exits 1 on every usage error;
+.B zfping
+matches the binary.)
+.TP
+.B 2
+Some addresses could not be resolved.
+.TP
+.B 4
+Internal error (e.g. socket permissions).
+.SH PERMISSIONS
+.B zfping
+first tries an unprivileged SOCK_DGRAM ICMP socket, then falls back to
+SOCK_RAW. For monitoring daemons, allow unprivileged ping sockets:
+.PP
+.nf
+    sysctl \-w net.ipv4.ping_group_range="0 2147483647"
+.fi
+.PP
+or grant the binary the raw-socket capability:
+.PP
+.nf
+    setcap cap_net_raw+ep zfping
+.fi
+.SH EXAMPLES
+.nf
+zfping \-c 3 \-i 5 192.0.2.1 2001:db8::1
+zfping \-g 192.168.1.0/24 \-a \-q
+zfping \-l \-p 1000 \-Q 10 \-N gateway1 gateway2
+.fi
+.SH SEE ALSO
+.BR fping (8),
+.BR ping (8)
+.PP
+Project page, library API and known divergences from fping:
+.I https://github.com/zaxified/zig\-fping
+.SH AUTHORS
+Port of
+.BR fping (8)
+(by Roland J. Schemers III and the fping contributors) to Zig. The original
+fping license applies; see the LICENSE file in the distribution.

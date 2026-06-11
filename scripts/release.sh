@@ -31,7 +31,8 @@ mkdir -p "$OUT"
 for target in $TARGETS; do
     echo "==> $target"
     "$ZIG" build -Dtarget="$target" -Doptimize=ReleaseSafe -Dstrip=true --prefix "$OUT/$target"
-    tar -C "$OUT/$target/bin" -czf "$OUT/zfping-v$VERSION-$target.tar.gz" zfping
+    cp doc/zfping.8 "$OUT/$target/bin/"
+    tar -C "$OUT/$target/bin" -czf "$OUT/zfping-v$VERSION-$target.tar.gz" zfping zfping.8
 done
 
 (cd "$OUT" && sha256sum zfping-*.tar.gz > SHA256SUMS)

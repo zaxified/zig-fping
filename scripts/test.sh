@@ -24,4 +24,7 @@ echo "==> zig build test"
 echo "==> functional tests (isolated namespace)"
 sh test/functional.sh ./zig-out/bin/zfping
 
+echo "==> golden-diff tests against reference fping"
+sh test/golden.sh ./zig-out/bin/zfping
+
 echo "==> all checks passed"

@@ -317,8 +317,12 @@ pub const Pinger = struct {
     inflight: u32 = 0,
     subnet_last: std.AutoHashMapUnmanaged(u64, i64) = .empty,
     prng: std.Random.DefaultPrng,
-    send_buf: []u8,
-    recv_buf: []u8,
+    /// Socket.batch_max packet slots for batched sends (slot 0 doubles as
+    /// the single-send buffer).
+    send_slab: []u8,
+    /// Bytes per send_slab slot (= wire size of one probe).
+    pkt_len: usize,
+    recv_batch: Socket.RecvBatch,
     result_fn: ?ResultFn = null,
     result_ctx: ?*anyopaque = null,
     /// Set asynchronously (e.g. from a signal handler) to end run().
@@ -330,11 +334,12 @@ pub const Pinger = struct {
             icmp.timestamp_msg_len
         else
             icmp.echo_header_len + @as(usize, cfg.payload_size);
-        const send_buf = try gpa.alloc(u8, pkt_len);
-        errdefer gpa.free(send_buf);
-        @memset(send_buf, 0);
-        const recv_buf = try gpa.alloc(u8, @max(4096, pkt_len + 128));
-        errdefer gpa.free(recv_buf);
+        const send_slab = try gpa.alloc(u8, Socket.batch_max * pkt_len);
+        errdefer gpa.free(send_slab);
+        @memset(send_slab, 0);
+        const recv_slot = @max(4096, pkt_len + 128);
+        const recv_slab = try gpa.alloc(u8, Socket.batch_max * recv_slot);
+        errdefer gpa.free(recv_slab);
 
         // Jitter only needs decorrelation, not cryptographic randomness.
         const seed: u64 = @bitCast(monoNow() ^ (@as(i64, linux.getpid()) << 32));
@@ -344,8 +349,9 @@ pub const Pinger = struct {
             .cfg = cfg,
             .seqmap = try SeqMap.init(gpa),
             .prng = .init(seed),
-            .send_buf = send_buf,
-            .recv_buf = recv_buf,
+            .send_slab = send_slab,
+            .pkt_len = pkt_len,
+            .recv_batch = .{ .slab = recv_slab, .slot_size = recv_slot },
         };
     }
 
@@ -357,8 +363,8 @@ pub const Pinger = struct {
         self.timeout_q.deinit(self.gpa);
         self.seqmap.deinit(self.gpa);
         self.subnet_last.deinit(self.gpa);
-        self.gpa.free(self.send_buf);
-        self.gpa.free(self.recv_buf);
+        self.gpa.free(self.send_slab);
+        self.gpa.free(self.recv_batch.slab);
         self.* = undefined;
     }
 
@@ -516,8 +522,10 @@ pub const Pinger = struct {
         }
 
         // Transmit while the global gap, the in-flight cap and the subnet
-        // buckets allow it (with a non-zero interval that is one packet).
-        while (try self.tryDispatch(now)) now = monoNow();
+        // buckets allow it; consecutive due sends (only possible with a
+        // zero interval) go out as one sendmmsg batch.
+        try self.dispatchDue();
+        now = monoNow();
 
         self.drainReplies();
 
@@ -554,23 +562,75 @@ pub const Pinger = struct {
         }
     }
 
-    /// One paced send attempt. Returns true when the queue head made
-    /// progress (sent, or re-scheduled by subnet pacing).
-    fn tryDispatch(self: *Pinger, now: i64) RunError!bool {
-        const ev = self.ping_q.peek() orelse return false;
-        if (ev.time > now) return false;
-        if (self.inflight >= self.cfg.max_inflight) return false;
-        if (now - self.last_send_ns < @as(i64, @intCast(self.cfg.interval_ns))) return false;
-        if (self.subnetReadyAt(ev, now)) |ready_at| {
-            // Subnet busy: push the event back to when its bucket frees up.
-            var deferred = self.ping_q.pop().?;
-            deferred.time = ready_at;
-            try self.ping_q.push(self.gpa, deferred);
-            return true;
+    /// Transmit every probe the pacing gates allow right now. With a
+    /// non-zero global interval at most one packet may leave per gap, so
+    /// batches only form when interval_ns == 0 — then consecutive due
+    /// sends to the same address family share one sendmmsg syscall.
+    fn dispatchDue(self: *Pinger) RunError!void {
+        var now = monoNow();
+        while (true) {
+            // Collect a same-family batch of events allowed to send now.
+            var events: [Socket.batch_max]Event = undefined;
+            var seqs: [Socket.batch_max]u16 = undefined;
+            var family: icmp.Family = undefined;
+            var n: usize = 0;
+            collect: while (n < Socket.batch_max) {
+                const ev = self.ping_q.peek() orelse break :collect;
+                if (ev.time > now) break :collect;
+                if (self.inflight + n >= self.cfg.max_inflight) break :collect;
+                if (n == 0) {
+                    if (now - self.last_send_ns < @as(i64, @intCast(self.cfg.interval_ns)))
+                        break :collect;
+                } else if (self.cfg.interval_ns != 0) break :collect;
+                const fam = self.targets.items[ev.target].addr.family();
+                if (n == 0) family = fam else if (fam != family) break :collect;
+                if (self.subnetReadyAt(ev, now)) |ready_at| {
+                    // Subnet busy: push the event back to when its bucket
+                    // frees up, then keep collecting other targets.
+                    var deferred = self.ping_q.pop().?;
+                    deferred.time = ready_at;
+                    try self.ping_q.push(self.gpa, deferred);
+                    continue :collect;
+                }
+                _ = self.ping_q.pop();
+                seqs[n] = try self.prepareProbe(ev, now, self.sendSlot(n));
+                events[n] = ev;
+                n += 1;
+            }
+            if (n == 0) return;
+
+            const sock = self.socketFor(family);
+            const t0 = &self.targets.items[events[0].target];
+            var accepted: usize = 0;
+            if (n > 1) {
+                var addrs: [Socket.batch_max]*const linux.sockaddr = undefined;
+                var packets: [Socket.batch_max][]const u8 = undefined;
+                for (events[0..n], 0..) |ev, i| {
+                    addrs[i] = self.targets.items[ev.target].addr.sockaddrPtr();
+                    packets[i] = self.sendSlot(i);
+                }
+                accepted = sock.sendMany(addrs[0..n], t0.addr.sockaddrLen(), packets[0..n]);
+            }
+            for (events[0..n], seqs[0..n], 0..) |ev, seq, i| {
+                if (i < accepted) {
+                    try self.commitProbe(ev, seq, now);
+                    continue;
+                }
+                // Single send, or the remainder of a short sendmmsg batch
+                // (retried individually for an accurate per-packet errno).
+                const t = &self.targets.items[ev.target];
+                if (sock.sendTo(t.addr.sockaddrPtr(), t.addr.sockaddrLen(), self.sendSlot(i))) {
+                    try self.commitProbe(ev, seq, now);
+                } else |err| {
+                    self.failProbe(ev, seq, err);
+                }
+            }
+            now = monoNow();
         }
-        _ = self.ping_q.pop();
-        try self.sendProbe(ev, now);
-        return true;
+    }
+
+    fn sendSlot(self: *Pinger, i: usize) []u8 {
+        return self.send_slab[i * self.pkt_len ..][0..self.pkt_len];
     }
 
     /// Returns when the subnet bucket of `ev`'s target allows sending, or
@@ -599,7 +659,11 @@ pub const Pinger = struct {
         return @max(w, 0);
     }
 
-    fn sendProbe(self: *Pinger, ev: Event, now: i64) RunError!void {
+    /// Write the wire packet for `ev` into `buf` and do all pre-send
+    /// bookkeeping: seqmap slot, pacing stamps, statistics and the next
+    /// probe of this target (fping cadence: scheduled relative to this
+    /// event's nominal time, not the actual send time).
+    fn prepareProbe(self: *Pinger, ev: Event, now: i64, buf: []u8) RunError!u16 {
         const t = &self.targets.items[ev.target];
         const sock = self.socketFor(t.addr.family());
 
@@ -607,37 +671,19 @@ pub const Pinger = struct {
             return error.SequenceSpaceExhausted;
 
         if (self.cfg.icmp_timestamp) {
-            icmp.writeTimestampRequest(self.send_buf, sock.ident, seq, originateMs());
+            icmp.writeTimestampRequest(buf, sock.ident, seq, originateMs());
         } else {
             if (self.cfg.random_payload)
-                self.prng.random().bytes(self.send_buf[icmp.echo_header_len..]);
-            icmp.writeEchoRequest(t.addr.family(), self.send_buf, sock.ident, seq);
+                self.prng.random().bytes(buf[icmp.echo_header_len..]);
+            icmp.writeEchoRequest(t.addr.family(), buf, sock.ident, seq);
         }
 
         t.attempts +%= 1;
         self.last_send_ns = now;
         if (self.cfg.subnet_gap_ns > 0)
             try self.subnet_last.put(self.gpa, t.addr.subnetKey(), now);
-
         t.stats.sent += 1;
-        if (sock.sendTo(t.addr.sockaddrPtr(), t.addr.sockaddrLen(), self.send_buf)) {
-            t.pending += 1;
-            self.inflight += 1;
-            try self.timeout_q.push(self.gpa, .{
-                .time = now + @as(i64, @intCast(t.timeout_ns)),
-                .target = ev.target,
-                .probe = ev.probe,
-                .seq = seq,
-            });
-        } else |err| {
-            self.seqmap.release(seq);
-            t.stats.send_errors += 1;
-            self.emit(ev.target, ev.probe, .{ .send_error = err });
-            self.checkDone(t);
-        }
 
-        // fping cadence: in count/loop modes the next probe is scheduled
-        // relative to this event's nominal time, not the actual send time.
         const more = switch (self.cfg.mode) {
             .count => ev.probe + 1 < self.cfg.count,
             .loop => true,
@@ -650,6 +696,29 @@ pub const Pinger = struct {
                 .probe = ev.probe +% 1,
             });
         }
+        return seq;
+    }
+
+    /// Post-send bookkeeping for a probe the kernel accepted.
+    fn commitProbe(self: *Pinger, ev: Event, seq: u16, now: i64) RunError!void {
+        const t = &self.targets.items[ev.target];
+        t.pending += 1;
+        self.inflight += 1;
+        try self.timeout_q.push(self.gpa, .{
+            .time = now + @as(i64, @intCast(t.timeout_ns)),
+            .target = ev.target,
+            .probe = ev.probe,
+            .seq = seq,
+        });
+    }
+
+    /// Bookkeeping for a probe the kernel rejected.
+    fn failProbe(self: *Pinger, ev: Event, seq: u16, err: Socket.SendError) void {
+        const t = &self.targets.items[ev.target];
+        self.seqmap.release(seq);
+        t.stats.send_errors += 1;
+        self.emit(ev.target, ev.probe, .{ .send_error = err });
+        self.checkDone(t);
     }
 
     fn handleTimeout(self: *Pinger, ev: Event, now: i64) RunError!void {
@@ -780,12 +849,18 @@ pub const Pinger = struct {
             };
             if (maybe_sock != null) {
                 const sock = self.socketFor(fam);
-                while (sock.recvMsg(self.recv_buf)) |info| {
-                    const recv_mono = if (info.timestamp_real_ns) |ts_real|
-                        mono_now - @max(real_now - ts_real, 0)
-                    else
-                        mono_now;
-                    self.handleReply(fam, info, recv_mono);
+                while (true) {
+                    const infos = sock.recvBatch(&self.recv_batch);
+                    if (infos.len == 0) break;
+                    for (infos) |info| {
+                        const recv_mono = if (info.timestamp_real_ns) |ts_real|
+                            mono_now - @max(real_now - ts_real, 0)
+                        else
+                            mono_now;
+                        self.handleReply(fam, info, recv_mono);
+                    }
+                    // A short batch means the socket is drained.
+                    if (infos.len < Socket.batch_max) break;
                 }
             }
         }

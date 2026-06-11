@@ -16,8 +16,14 @@ jobs:
         with:
           version: 0.16.0
 
+      # Reference binary for the golden-diff suite (test/golden.sh);
+      # ubuntu-latest ships fping 5.1.
+      - name: Install reference fping
+        run: sudo apt-get update && sudo apt-get install -y fping
+
       # Same entry point as local development: scripts/test.sh runs
-      # fmt --check, build, unit tests and the namespaced functional suite.
+      # fmt --check, build, unit tests, the namespaced functional suite
+      # and the golden-diff comparison against the reference fping.
       - name: Test pipeline
         run: sh scripts/test.sh
 

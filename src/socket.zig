@@ -252,15 +252,12 @@ pub fn sendTo(self: *const Socket, addr: *const linux.sockaddr, addr_len: linux.
     }
 }
 
-/// sendmsg with an IP_PKTINFO / IPV6_PKTINFO control message forcing the
+/// Build the IP_PKTINFO / IPV6_PKTINFO control message forcing the
 /// outgoing interface (fping --oiface, see socket_sendto_ping_ipv4 in
-/// socket4.c).
-fn sendmsgPktinfo(self: *const Socket, addr: *const linux.sockaddr, addr_len: linux.socklen_t, packet: []const u8) usize {
+/// socket4.c). Returns the control length to pass in msghdr.
+fn buildPktinfo(self: *const Socket, control: *align(@alignOf(linux.cmsghdr)) [64]u8) usize {
     const hdr_len = @sizeOf(linux.cmsghdr);
-    var control: [64]u8 align(@alignOf(linux.cmsghdr)) = @splat(0);
-    var control_len: usize = 0;
-
-    const cmsg: *linux.cmsghdr = @ptrCast(&control);
+    const cmsg: *linux.cmsghdr = @ptrCast(control);
     switch (self.family) {
         .v4 => {
             const info: linux.in_pktinfo = .{
@@ -280,7 +277,12 @@ fn sendmsgPktinfo(self: *const Socket, addr: *const linux.sockaddr, addr_len: li
             @memcpy(control[hdr_len..][0..@sizeOf(linux.in6_pktinfo)], std.mem.asBytes(&info));
         },
     }
-    control_len = std.mem.alignForward(usize, cmsg.len, @alignOf(linux.cmsghdr));
+    return std.mem.alignForward(usize, cmsg.len, @alignOf(linux.cmsghdr));
+}
+
+fn sendmsgPktinfo(self: *const Socket, addr: *const linux.sockaddr, addr_len: linux.socklen_t, packet: []const u8) usize {
+    var control: [64]u8 align(@alignOf(linux.cmsghdr)) = @splat(0);
+    const control_len = self.buildPktinfo(&control);
 
     var iov = [_]std.posix.iovec_const{.{ .base = packet.ptr, .len = packet.len }};
     const msg: linux.msghdr_const = .{
@@ -293,6 +295,47 @@ fn sendmsgPktinfo(self: *const Socket, addr: *const linux.sockaddr, addr_len: li
         .flags = 0,
     };
     return linux.sendmsg(self.fd, &msg, linux.MSG.NOSIGNAL);
+}
+
+/// Messages exchanged per sendmmsg/recvmmsg syscall.
+pub const batch_max = 16;
+
+/// Send up to batch_max same-family packets with one sendmmsg call.
+/// Returns how many packets the kernel accepted; the caller retries the
+/// remainder via sendTo, which reports an accurate per-packet errno
+/// (sendmmsg stops at the first failure without saying why).
+pub fn sendMany(
+    self: *const Socket,
+    addrs: []const *const linux.sockaddr,
+    addr_len: linux.socklen_t,
+    packets: []const []const u8,
+) usize {
+    std.debug.assert(addrs.len == packets.len and packets.len <= batch_max);
+    var control: [64]u8 align(@alignOf(linux.cmsghdr)) = @splat(0);
+    const control_len: usize = if (self.oiface_index != 0) self.buildPktinfo(&control) else 0;
+
+    var iovs: [batch_max]std.posix.iovec = undefined;
+    var msgs: [batch_max]linux.mmsghdr = undefined;
+    for (packets, addrs, 0..) |pkt, addr, i| {
+        // mmsghdr embeds the mutable msghdr; the kernel never writes
+        // through iov/name on the send path, so the casts are safe.
+        iovs[i] = .{ .base = @constCast(pkt.ptr), .len = pkt.len };
+        msgs[i] = .{
+            .hdr = .{
+                .name = @constCast(addr),
+                .namelen = addr_len,
+                .iov = @ptrCast(&iovs[i]),
+                .iovlen = 1,
+                .control = if (control_len != 0) &control else null,
+                .controllen = control_len,
+                .flags = 0,
+            },
+            .len = 0,
+        };
+    }
+    const rc = linux.sendmmsg(self.fd, &msgs, @intCast(packets.len), linux.MSG.NOSIGNAL);
+    if (linux.errno(rc) != .SUCCESS) return 0;
+    return rc;
 }
 
 /// Read one packet with ancillary data; returns null when the socket is
@@ -315,18 +358,65 @@ pub fn recvMsg(self: *const Socket, buf: []u8) ?RecvInfo {
     if (linux.errno(rc) != .SUCCESS) return null;
 
     var info: RecvInfo = .{ .packet = buf[0..rc] };
-
-    if (msg.namelen >= 2) {
-        const af = std.mem.readInt(u16, src_storage[0..2], .little);
-        if (af == linux.AF.INET and msg.namelen >= @sizeOf(linux.sockaddr.in)) {
-            info.src = .{ .v4 = @bitCast(src_storage[0..@sizeOf(linux.sockaddr.in)].*) };
-        } else if (af == linux.AF.INET6 and msg.namelen >= @sizeOf(linux.sockaddr.in6)) {
-            info.src = .{ .v6 = @bitCast(src_storage[0..@sizeOf(linux.sockaddr.in6)].*) };
-        }
-    }
-
+    info.src = parseSrc(&src_storage, msg.namelen);
     parseControl(control[0..msg.controllen], &info);
     return info;
+}
+
+fn parseSrc(storage: *const [@sizeOf(linux.sockaddr.in6)]u8, namelen: linux.socklen_t) RecvInfo.SrcAddr {
+    if (namelen < 2) return .none;
+    const af = std.mem.readInt(u16, storage[0..2], .little);
+    if (af == linux.AF.INET and namelen >= @sizeOf(linux.sockaddr.in)) {
+        return .{ .v4 = @bitCast(storage[0..@sizeOf(linux.sockaddr.in)].*) };
+    } else if (af == linux.AF.INET6 and namelen >= @sizeOf(linux.sockaddr.in6)) {
+        return .{ .v6 = @bitCast(storage[0..@sizeOf(linux.sockaddr.in6)].*) };
+    }
+    return .none;
+}
+
+/// Reusable storage for batched receives: one packet slab of batch_max
+/// slots (allocated by the owner) plus per-message scratch headers.
+pub const RecvBatch = struct {
+    /// batch_max * slot_size bytes.
+    slab: []u8,
+    slot_size: usize,
+    addrs: [batch_max][@sizeOf(linux.sockaddr.in6)]u8 align(8) = undefined,
+    controls: [batch_max][256]u8 align(@alignOf(linux.cmsghdr)) = undefined,
+    iovs: [batch_max]std.posix.iovec = undefined,
+    msgs: [batch_max]linux.mmsghdr = undefined,
+    infos: [batch_max]RecvInfo = undefined,
+};
+
+/// Read up to batch_max packets with one recvmmsg call. Returns the empty
+/// slice when the socket is drained (EAGAIN) or on transient errors; a
+/// full slice means more packets may be waiting — call again.
+pub fn recvBatch(self: *const Socket, b: *RecvBatch) []const RecvInfo {
+    std.debug.assert(b.slab.len >= batch_max * b.slot_size);
+    for (0..batch_max) |i| {
+        b.iovs[i] = .{ .base = b.slab.ptr + i * b.slot_size, .len = b.slot_size };
+        b.msgs[i] = .{
+            .hdr = .{
+                .name = @ptrCast(&b.addrs[i]),
+                .namelen = b.addrs[i].len,
+                .iov = @ptrCast(&b.iovs[i]),
+                .iovlen = 1,
+                .control = &b.controls[i],
+                .controllen = b.controls[i].len,
+                .flags = 0,
+            },
+            .len = 0,
+        };
+    }
+    const rc = linux.recvmmsg(self.fd, &b.msgs, batch_max, 0, null);
+    if (linux.errno(rc) != .SUCCESS) return b.infos[0..0];
+    const n: usize = rc;
+    for (b.msgs[0..n], 0..) |*m, i| {
+        var info: RecvInfo = .{ .packet = b.slab[i * b.slot_size ..][0..m.len] };
+        info.src = parseSrc(&b.addrs[i], m.hdr.namelen);
+        parseControl(b.controls[i][0..m.hdr.controllen], &info);
+        b.infos[i] = info;
+    }
+    return b.infos[0..n];
 }
 
 /// Walk the cmsg list (manual CMSG_NXTHDR; std has no cmsg iteration

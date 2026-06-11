@@ -11,7 +11,11 @@ const fping = @import("zig_fping");
 const options_mod = @import("cli/options.zig");
 const generate = @import("cli/generate.zig");
 
-const version_string = "zfping 0.1.0 (Zig port of fping, https://fping.org)";
+const version_string = "zfping 0.1.1 (Zig port of fping, https://fping.org)";
+
+/// Program name for error prefixes — argv[0] as invoked, like fping's
+/// global `prog`. Set early in main().
+var prog: []const u8 = "zfping";
 
 const usage_text =
     \\Usage: zfping [options] [targets...]
@@ -73,10 +77,12 @@ const usage_text =
 ;
 
 /// fping exit codes: 0 all reachable, 1 some unreachable, 2 addresses not
-/// found, 3 invalid arguments, 4 internal error.
+/// found, 4 internal error. The man page documents exit 3 for invalid
+/// arguments, but the binary calls usage(1)/exit(1) on every usage error;
+/// we match the binary (verified against fping develop@780ec46).
 const exit_unreachable = 1;
 const exit_noaddress = 2;
-const exit_usage = 3;
+const exit_usage = 1;
 const exit_internal = 4;
 
 /// Milliseconds rendering identical to fping's sprint_tm().
@@ -105,6 +111,9 @@ fn realNowNs() i64 {
 const TargetState = struct {
     /// Display name: the target as the user gave it, or its address with -A.
     name: []const u8,
+    /// Netdata chart id (-N): display name with non-alphanumeric characters
+    /// replaced by '_', like fping's add_addr() sanitization.
+    netdata_id: []const u8 = "",
     /// Resolved counts (reply/timeout/error) — fping computes per-line loss
     /// from resolved probes only, not from packets already in flight.
     resolved: u32 = 0,
@@ -153,6 +162,7 @@ const Ctx = struct {
 pub fn main(init: std.process.Init) !void {
     const arena = init.arena.allocator();
     const args = try init.minimal.args.toSlice(arena);
+    if (args.len > 0) prog = args[0];
 
     var stdout_buffer: [8192]u8 = undefined;
     var stdout_writer: Io.File.Writer = .init(.stdout(), init.io, &stdout_buffer);
@@ -164,15 +174,24 @@ pub fn main(init: std.process.Init) !void {
 
     var diag: options_mod.Diagnostic = .{};
     const parsed = options_mod.parse(arena, args[1..], &diag) catch |e| {
-        const what: []const u8 = switch (e) {
-            error.UnknownOption => "unknown option",
-            error.MissingValue => "missing value for option",
-            error.InvalidValue => "invalid value",
+        // fping's optparse errors print "<argv0>: <msg> -- '<opt>'" plus a
+        // hint line and exit 1; invalid option *values* go through usage(1),
+        // which dumps the whole usage text to stderr. The hint names "fping"
+        // literally (so does upstream regardless of argv[0]).
+        switch (e) {
+            error.UnknownOption, error.MissingValue => {
+                const what: []const u8 = if (e == error.UnknownOption)
+                    "invalid option"
+                else
+                    "option requires an argument";
+                err.print("{s}: {s} -- '{s}'\n", .{ args[0], what, diag.text }) catch {};
+                err.writeAll("see 'fping -h' for usage information\n") catch {};
+                err.flush() catch {};
+                std.process.exit(exit_usage);
+            },
+            error.InvalidValue => usageError(err),
             error.OutOfMemory => return e,
-        };
-        err.print("zfping: {s}: {s}\n", .{ what, diag.text }) catch {};
-        err.flush() catch {};
-        std.process.exit(exit_usage);
+        }
     };
     const opts = parsed.opts;
 
@@ -190,18 +209,20 @@ pub fn main(init: std.process.Init) !void {
     validate(opts, err);
 
     // ---- Build the raw target list ------------------------------------
+    // fping treats file/generate/cmdline conflicts and bad -g arguments as
+    // usage(1) errors (usage dump, exit 1).
     var raw_targets: std.ArrayList([]const u8) = .empty;
     if (opts.generate) {
-        if (opts.file != null) failUsage(err, "-g and -f are mutually exclusive", .{});
+        if (opts.file != null) usageError(err);
         switch (parsed.targets.items.len) {
-            1 => generate.addCidr(arena, &raw_targets, parsed.targets.items[0]) catch |e|
-                failUsage(err, "-g: {s}", .{@errorName(e)}),
-            2 => generate.addRange(arena, &raw_targets, parsed.targets.items[0], parsed.targets.items[1]) catch |e|
-                failUsage(err, "-g: {s}", .{@errorName(e)}),
-            else => failUsage(err, "-g requires a CIDR or a start/end address pair", .{}),
+            1 => generate.addCidr(arena, &raw_targets, parsed.targets.items[0]) catch
+                usageError(err),
+            2 => generate.addRange(arena, &raw_targets, parsed.targets.items[0], parsed.targets.items[1]) catch
+                usageError(err),
+            else => usageError(err),
         }
     } else if (opts.file) |path| {
-        if (parsed.targets.items.len > 0) failUsage(err, "-f and target list are mutually exclusive", .{});
+        if (parsed.targets.items.len > 0) usageError(err);
         try readTargetFile(arena, init.io, &raw_targets, path, err);
     } else if (parsed.targets.items.len > 0) {
         try raw_targets.appendSlice(arena, parsed.targets.items);
@@ -209,15 +230,11 @@ pub fn main(init: std.process.Init) !void {
         // fping reads targets from stdin when none are given.
         try readTargetFile(arena, init.io, &raw_targets, "-", err);
     }
-    if (raw_targets.items.len == 0) {
-        err.writeAll(usage_text) catch {};
-        err.flush() catch {};
-        std.process.exit(exit_usage);
-    }
+    if (raw_targets.items.len == 0) usageError(err);
 
     // ---- Engine configuration ------------------------------------------
-    const count_mode = opts.count != null or opts.vcount != null;
-    const probes: u32 = opts.vcount orelse (opts.count orelse 1);
+    const count_mode = opts.count != null;
+    const probes: u32 = opts.count orelse 1;
     // fping auto-tunes the timeout in count/loop modes: period capped at 2 s.
     const timeout_ns = opts.timeout_ns orelse if (count_mode or opts.loop)
         @min(opts.period_ns, 2000 * std.time.ns_per_ms)
@@ -248,7 +265,7 @@ pub fn main(init: std.process.Init) !void {
     if (opts.icmp_timestamp) cfg.socket_mode = .raw;
     if (opts.src_addr) |src| {
         const addr = fping.Addr.parse(src) catch
-            failUsage(err, "invalid source address: {s}", .{src});
+            failUsage(err, "can't parse source address: {s}", .{src});
         switch (addr) {
             .v4 => cfg.source4 = addr,
             .v6 => cfg.source6 = addr,
@@ -266,28 +283,50 @@ pub fn main(init: std.process.Init) !void {
         const family_filter: ?Io.net.IpAddress.Family =
             if (opts.ipv4_only) .ip4 else if (opts.ipv6_only) .ip6 else null;
         var addrs_buf: [32]fping.Addr = undefined;
-        const addrs = resolveTarget(init.io, name, family_filter, opts.all_addrs, &addrs_buf) catch {
-            err.print("{s}: Name or service not known\n", .{name}) catch {};
+        const addrs = resolveTarget(init.io, name, family_filter, opts.all_addrs, &addrs_buf) catch |e| {
+            // fping warns via print_warning (stderr, suppressed by -q) with
+            // the gai_strerror text; map std lookup errors onto those.
+            if (!opts.quiet) {
+                const reason: []const u8 = switch (e) {
+                    error.UnknownHostName, error.NoAddressReturned => "Name or service not known",
+                    else => "Temporary failure in name resolution",
+                };
+                err.print("{s}: {s}\n", .{ name, reason }) catch {};
+            }
             num_noaddress += 1;
             continue;
         };
         const numeric = if (fping.Addr.parse(name)) |_| true else |_| false;
         for (addrs) |addr| {
             _ = try pinger.addTargetAddr(addr);
-            // Display-name precedence mirrors fping: reverse DNS (-d always;
-            // -n only for numeric targets), then -A/-m numeric address,
-            // then the target as the user typed it.
-            var display: []const u8 = if (opts.by_addr or opts.all_addrs)
-                try std.fmt.allocPrint(arena, "{f}", .{addr})
-            else
-                name;
+            // Display name mirrors fping's add_name(): printname is the
+            // target as typed, replaced by reverse DNS for -d (always) or
+            // -n (numeric targets only); -A shows the numeric address, or
+            // "printname (addr)" when combined with -n/-d. -m alone keeps
+            // the printname for every resolved address.
+            var printname = name;
             if (opts.rdns or (opts.name_lookup and numeric)) {
                 var name_buf: [256]u8 = undefined;
                 if (fping.rdns.lookupPtr(rdnsAddress(addr), &name_buf, .{})) |ptr_name| {
-                    display = try arena.dupe(u8, ptr_name);
+                    printname = try arena.dupe(u8, ptr_name);
                 }
             }
-            try states.append(arena, .{ .name = display });
+            const display: []const u8 = if (opts.by_addr) blk: {
+                const addr_str = try std.fmt.allocPrint(arena, "{f}", .{addr});
+                break :blk if (opts.name_lookup or opts.rdns)
+                    try std.fmt.allocPrint(arena, "{s} ({s})", .{ printname, addr_str })
+                else
+                    addr_str;
+            } else printname;
+            var st: TargetState = .{ .name = display };
+            if (opts.netdata) {
+                const id = try arena.dupe(u8, display);
+                for (id) |*c| {
+                    if (!std.ascii.isAlphanumeric(c.*)) c.* = '_';
+                }
+                st.netdata_id = id;
+            }
+            try states.append(arena, st);
         }
     }
     if (pinger.targetCount() == 0) {
@@ -308,14 +347,15 @@ pub fn main(init: std.process.Init) !void {
         .tz = &local_tz,
         .per_recv = (count_mode or opts.loop) and !opts.quiet,
         // fping prints "is alive"/"is unreachable" verbosity by default;
-        // -a/-u/-q and count/loop modes suppress it.
+        // -a/-u/-q/-x/-X and count/loop modes suppress it (-N and -J do
+        // not on their own — they are gated by -l/-c upstream).
         .verbose = !(opts.show_alive or opts.show_unreach or opts.quiet or
-            opts.json or opts.netdata or count_mode or opts.loop),
+            opts.reachable != null or count_mode or opts.loop),
         .num_noaddress = num_noaddress,
         .start_real_ns = realNowNs(),
     };
     for (ctx.states) |*st| ctx.name_pad = @max(ctx.name_pad, st.name.len);
-    if (opts.vcount != null) {
+    if (opts.report_all_rtts) {
         for (ctx.states) |*st| {
             st.vcount_rtts = try arena.alloc(?u64, probes);
             @memset(st.vcount_rtts, null);
@@ -334,7 +374,7 @@ pub fn main(init: std.process.Init) !void {
             \\or grant the binary raw-socket capability:
             \\  sudo setcap cap_net_raw+ep zfping
         , .{}),
-        error.UnknownInterface => failUsage(err, "unknown interface: {s}", .{opts.oiface orelse "?"}),
+        error.UnknownInterface => failUsage(err, "unknown interface '{s}'", .{opts.oiface orelse "?"}),
         error.InterfaceBind => failInternal(err, "cannot bind to interface (needs CAP_NET_RAW): {s}", .{opts.iface orelse "?"}),
         error.SourceAddressBind => failInternal(err, "cannot bind source address: {s}", .{opts.src_addr orelse "?"}),
         else => failInternal(err, "run failed: {s}", .{@errorName(e)}),
@@ -347,28 +387,37 @@ pub fn main(init: std.process.Init) !void {
 }
 
 fn validate(opts: options_mod.Options, err: *Io.Writer) void {
+    // Messages and exit codes mirror fping's inline checks in fping.c.
     if (opts.ipv4_only and opts.ipv6_only)
-        failUsage(err, "-4 and -6 are mutually exclusive", .{});
-    if (opts.count != null and opts.vcount != null)
-        failUsage(err, "-c and -C are mutually exclusive", .{});
-    if (opts.loop and (opts.count != null or opts.vcount != null))
-        failUsage(err, "-l and -c/-C are mutually exclusive", .{});
-    if (opts.json and !(opts.count != null or opts.vcount != null or opts.loop))
-        failUsage(err, "-J requires -c, -C or -l", .{});
-    if (opts.netdata and !(opts.loop and opts.squiet_ns != null))
-        failUsage(err, "-N requires -l and -Q", .{});
+        failUsage(err, "can't specify both -4 and -6", .{});
+    if (opts.loop and opts.count != null)
+        failUsage(err, "specify only one of c, l", .{});
+    if (opts.json and !(opts.count != null or opts.loop))
+        failUsage(err, "option -J, --json requires -c, -C, or -l", .{});
+    // fping checks this while parsing, so upstream it only fires when -4/-6
+    // precede --icmp-timestamp; we check it order-independently.
     if (opts.icmp_timestamp and opts.ipv6_only)
-        failUsage(err, "--icmp-timestamp works with IPv4 only", .{});
+        failUsage(err, "ICMP Timestamp is IPv4 only", .{});
+    // NOTE: fping never validates -N (netdata) prerequisites; -N without
+    // -l/-Q simply behaves like a normal run, so neither do we.
 }
 
+/// fping's usage(1): dump the usage text to stderr and exit 1.
+fn usageError(err: *Io.Writer) noreturn {
+    err.writeAll(usage_text) catch {};
+    err.flush() catch {};
+    std.process.exit(exit_usage);
+}
+
+/// fping's inline "<prog>: <message>" + exit(1) error path.
 fn failUsage(err: *Io.Writer, comptime fmt: []const u8, args: anytype) noreturn {
-    err.print("zfping: " ++ fmt ++ "\n", args) catch {};
+    err.print("{s}: " ++ fmt ++ "\n", .{prog} ++ args) catch {};
     err.flush() catch {};
     std.process.exit(exit_usage);
 }
 
 fn failInternal(err: *Io.Writer, comptime fmt: []const u8, args: anytype) noreturn {
-    err.print("zfping: " ++ fmt ++ "\n", args) catch {};
+    err.print("{s}: " ++ fmt ++ "\n", .{prog} ++ args) catch {};
     err.flush() catch {};
     std.process.exit(exit_internal);
 }
@@ -447,13 +496,16 @@ fn resolveTarget(
             .address => |ip| {
                 out_buf[n] = fping.Addr.fromIpAddress(ip);
                 n += 1;
-                if (!all) break;
             },
             .canonical_name => {},
         }
     }
     if (n == 0) return error.UnknownHostName;
-    return out_buf[0..n];
+    // fping takes getaddrinfo results in order, which glibc sorts per
+    // RFC 6724 (e.g. ::1 before 127.0.0.1 for "localhost"); std's lookup
+    // returns /etc/hosts and DNS order, so sort here to match.
+    fping.netutil.sortByDestinationPolicy(out_buf[0..n]);
+    return if (all) out_buf[0..n] else out_buf[0..1];
 }
 
 // ---- Signal handling ------------------------------------------------------
@@ -790,26 +842,32 @@ fn printIntervalJson(ctx: *Ctx) !void {
 }
 
 fn printNetdata(ctx: *Ctx) !void {
-    const interval_s = (ctx.opts.squiet_ns orelse 0) / std.time.ns_per_s;
+    // fping renders the chart interval with printf "%.0f" — round half to
+    // even, not truncation (e.g. -Q 1.5 prints "2", -Q 0.5 prints "0").
+    const ns = ctx.opts.squiet_ns orelse 0;
+    var interval_s = ns / std.time.ns_per_s;
+    const rem = ns % std.time.ns_per_s;
+    const half = std.time.ns_per_s / 2;
+    if (rem > half or (rem == half and interval_s % 2 == 1)) interval_s += 1;
     for (ctx.states) |*st| {
         if (!ctx.netdata_charts_sent) {
-            try ctx.out.print("CHART fping.{s}_packets '' 'FPing Packets' packets '{s}' fping.packets line 110020 {d}\n", .{ st.name, st.name, interval_s });
+            try ctx.out.print("CHART fping.{s}_packets '' 'FPing Packets' packets '{s}' fping.packets line 110020 {d}\n", .{ st.netdata_id, st.name, interval_s });
             try ctx.out.writeAll("DIMENSION xmt sent absolute 1 1\nDIMENSION rcv received absolute 1 1\n");
         }
-        try ctx.out.print("BEGIN fping.{s}_packets\nSET xmt = {d}\nSET rcv = {d}\nEND\n", .{ st.name, st.sent_i, st.recv_i });
+        try ctx.out.print("BEGIN fping.{s}_packets\nSET xmt = {d}\nSET rcv = {d}\nEND\n", .{ st.netdata_id, st.sent_i, st.recv_i });
 
         if (!ctx.netdata_charts_sent) {
-            try ctx.out.print("CHART fping.{s}_quality '' 'FPing Quality' percentage '{s}' fping.quality area 110010 {d}\n", .{ st.name, st.name, interval_s });
+            try ctx.out.print("CHART fping.{s}_quality '' 'FPing Quality' percentage '{s}' fping.quality area 110010 {d}\n", .{ st.netdata_id, st.name, interval_s });
             try ctx.out.writeAll("DIMENSION returned '' absolute 1 1\n");
         }
         const quality = if (st.sent_i > 0) (st.recv_i * 100) / st.sent_i else 0;
-        try ctx.out.print("BEGIN fping.{s}_quality\nSET returned = {d}\nEND\n", .{ st.name, quality });
+        try ctx.out.print("BEGIN fping.{s}_quality\nSET returned = {d}\nEND\n", .{ st.netdata_id, quality });
 
         if (!ctx.netdata_charts_sent) {
-            try ctx.out.print("CHART fping.{s}_latency '' 'FPing Latency' ms '{s}' fping.latency area 110000 {d}\n", .{ st.name, st.name, interval_s });
+            try ctx.out.print("CHART fping.{s}_latency '' 'FPing Latency' ms '{s}' fping.latency area 110000 {d}\n", .{ st.netdata_id, st.name, interval_s });
             try ctx.out.writeAll("DIMENSION min minimum absolute 1 1000000\nDIMENSION max maximum absolute 1 1000000\nDIMENSION avg average absolute 1 1000000\n");
         }
-        try ctx.out.print("BEGIN fping.{s}_latency\n", .{st.name});
+        try ctx.out.print("BEGIN fping.{s}_latency\n", .{st.netdata_id});
         if (st.recv_i > 0) {
             try ctx.out.print("SET min = {d}\nSET avg = {d}\nSET max = {d}\n", .{
                 st.min_i, st.total_i / st.recv_i, st.max_i,
@@ -851,7 +909,7 @@ fn finish(ctx: *Ctx) !void {
     }
     try ctx.out.flush();
 
-    const count_mode = opts.count != null or opts.vcount != null;
+    const count_mode = opts.count != null;
     if (count_mode or opts.loop) {
         if (opts.json) try printPerSystemJson(ctx) else try printPerSystem(ctx);
     }
@@ -884,7 +942,7 @@ fn printPerSystem(ctx: *Ctx) !void {
         try printPaddedName(ctx, ctx.err, st.name);
         try ctx.err.writeAll(" :");
 
-        if (ctx.opts.vcount != null) {
+        if (ctx.opts.report_all_rtts) {
             for (st.vcount_rtts) |maybe_rtt| {
                 if (maybe_rtt) |rtt| {
                     try ctx.err.writeAll(" ");
@@ -922,7 +980,7 @@ fn printPerSystemJson(ctx: *Ctx) !void {
         const st = ctx.state(id);
         const stats = ctx.pinger.stats(id);
 
-        if (ctx.opts.vcount != null) {
+        if (ctx.opts.report_all_rtts) {
             try ctx.out.print("{{\"vSum\": {{\"host\": \"{s}\", \"values\": [", .{st.name});
             for (st.vcount_rtts, 0..) |maybe_rtt, j| {
                 if (j > 0) try ctx.out.writeAll(", ");

@@ -211,3 +211,22 @@ test "v6 range and cidr carry scope suffix" {
     try std.testing.expectError(error.ScopeMismatch, addRange(gpa, &list, "fe80::1%eth0", "fe80::2%eth1"));
     try std.testing.expectError(error.InvalidScope, addRange(gpa, &list, "10.0.0.1%eth0", "10.0.0.2%eth0"));
 }
+
+test "fuzz: target generation never crashes" {
+    // Runs as a smoke test under `zig build test`; becomes a real fuzz
+    // target with `zig build test --fuzz` (see scripts/fuzz.sh).
+    try std.testing.fuzz({}, fuzzGenerate, .{});
+}
+
+fn fuzzGenerate(_: void, smith: *std.testing.Smith) !void {
+    const gpa = std.testing.allocator;
+    var buf: [64]u8 = undefined;
+    smith.bytes(&buf);
+    const len: usize = smith.valueRangeAtMost(u8, 0, buf.len);
+    const split: usize = smith.valueRangeAtMost(u8, 0, @intCast(len));
+
+    var list: std.ArrayList([]const u8) = .empty;
+    defer freeList(gpa, &list);
+    addCidr(gpa, &list, buf[0..len]) catch {};
+    addRange(gpa, &list, buf[0..split], buf[split..len]) catch {};
+}

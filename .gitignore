@@ -4,3 +4,4 @@ zig-out/
 releases/
 .claude/settings.local.json
 *.code-workspace
+codedb.snapshot

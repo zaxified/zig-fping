@@ -11,8 +11,8 @@ one network branch causes false DOWN states.
 
 ## Workspace rules
 
-- Conversation with the user is in **Czech**; all code comments, commit
-  messages and documentation in the workspace are in **English**.
+- All code comments, commit messages and documentation in the repository
+  are in **English**.
 - **No personal information** (real name, e-mail, `/home/<user>` paths) may
   appear in committed files — use `~` for home paths. GitHub user is
   `zaxified`.
@@ -25,9 +25,9 @@ one network branch causes false DOWN states.
 - `zfping` must be as close to 100% fping-compatible as possible; anything
   that cannot be implemented must carry a code comment explaining why
   (see also CHANGELOG.md "Known divergences").
-- Released: **v0.1.0 "fping-complete-zig-port"**. Known bugs/divergences are
-  deferred to 0.2.0.
-- Use the Read tool for reading files, not sed/cat.
+- Released: **v0.1.0 "fping-complete-zig-port"**; v0.1.1 (golden-diff
+  suite, fuzz targets, sendmmsg/recvmmsg batching, compat fixes) is in
+  CHANGELOG.md as "unreleased" until tagged.
 
 ## Upstream tracking (fping → zig-fping)
 
@@ -73,11 +73,13 @@ project stays an "improved clone" of the C original.
 ## Build & test
 
 ```sh
-scripts/test.sh            # canonical pipeline: fmt + build + unit + functional
+scripts/test.sh            # canonical pipeline: fmt + build + unit + functional + golden
 scripts/release.sh         # release artifacts into releases/v<version>/
+scripts/fuzz.sh [secs]     # time-boxed fuzzing (blocked on Zig 0.16.0, see header)
 $ZIG build                 # library + zfping CLI
 $ZIG build test            # unit tests
 sh test/functional.sh      # functional suite (isolated user+net namespace)
+sh test/golden.sh          # byte-diff against reference fping (needs fping installed)
 ```
 
 scripts/zig-env.sh resolves the pinned toolchain ($ZIG → PATH →

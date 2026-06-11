@@ -12,8 +12,8 @@ pub const Options = struct {
     ipv6_only: bool = false, // -6
     size: u16 = 56, // -b
     backoff: f32 = 1.5, // -B
-    count: ?u32 = null, // -c
-    vcount: ?u32 = null, // -C (count with per-probe report)
+    count: ?u32 = null, // -c / -C (fping: both set opt_count, last one wins)
+    report_all_rtts: bool = false, // -C (verbose per-probe RTT table)
     file: ?[]const u8 = null, // -f ("-" = stdin)
     generate: bool = false, // -g
     ttl: ?u8 = null, // -H
@@ -106,7 +106,7 @@ pub fn parse(gpa: std.mem.Allocator, args: []const []const u8, diag: *Diagnostic
             const val = inline_val orelse blk: {
                 if (longTakesValue(name)) {
                     if (i + 1 >= args.len) {
-                        diag.text = arg;
+                        diag.text = name;
                         return error.MissingValue;
                     }
                     consumed_next = true;
@@ -123,7 +123,8 @@ pub fn parse(gpa: std.mem.Allocator, args: []const []const u8, diag: *Diagnostic
                 if (shortTakesValue(c)) {
                     const val = if (j + 1 < arg.len) arg[j + 1 ..] else blk: {
                         if (i + 1 >= args.len) {
-                            diag.text = arg;
+                            // fping/optparse reports the bare option letter.
+                            diag.text = arg[j .. j + 1];
                             return error.MissingValue;
                         }
                         i += 1;
@@ -132,7 +133,7 @@ pub fn parse(gpa: std.mem.Allocator, args: []const []const u8, diag: *Diagnostic
                     try applyShortValue(&res.opts, c, val, diag);
                     break;
                 }
-                diag.text = arg;
+                diag.text = arg[j .. j + 1];
                 try applyShortFlag(&res.opts, c);
             }
         } else {
@@ -174,8 +175,12 @@ fn applyShortValue(o: *Options, c: u8, val: []const u8, diag: *Diagnostic) Parse
     switch (c) {
         'b' => o.size = std.fmt.parseInt(u16, val, 10) catch return error.InvalidValue,
         'B' => o.backoff = std.fmt.parseFloat(f32, val) catch return error.InvalidValue,
-        'c' => o.count = std.fmt.parseInt(u32, val, 10) catch return error.InvalidValue,
-        'C' => o.vcount = std.fmt.parseInt(u32, val, 10) catch return error.InvalidValue,
+        // fping rejects a zero count/threshold with usage(1).
+        'c' => o.count = try parseNonZero(val),
+        'C' => {
+            o.count = try parseNonZero(val);
+            o.report_all_rtts = true;
+        },
         'f' => o.file = val,
         'H' => o.ttl = std.fmt.parseInt(u8, val, 10) catch return error.InvalidValue,
         'i' => o.interval_ns = try parseMs(val),
@@ -187,9 +192,9 @@ fn applyShortValue(o: *Options, c: u8, val: []const u8, diag: *Diagnostic) Parse
         'r' => o.retries = std.fmt.parseInt(u16, val, 10) catch return error.InvalidValue,
         'S' => o.src_addr = val,
         't' => o.timeout_ns = try parseMs(val),
-        'x' => o.reachable = std.fmt.parseInt(u32, val, 10) catch return error.InvalidValue,
+        'x' => o.reachable = try parseNonZero(val),
         'X' => {
-            o.reachable = std.fmt.parseInt(u32, val, 10) catch return error.InvalidValue;
+            o.reachable = try parseNonZero(val);
             o.fast_reachable = true;
         },
         else => unreachable,
@@ -316,6 +321,12 @@ fn applyLong(o: *Options, name: []const u8, val: []const u8, diag: *Diagnostic) 
     }
 }
 
+fn parseNonZero(val: []const u8) ParseError!u32 {
+    const n = std.fmt.parseInt(u32, val, 10) catch return error.InvalidValue;
+    if (n == 0) return error.InvalidValue;
+    return n;
+}
+
 fn parseMs(val: []const u8) ParseError!u64 {
     const ms = std.fmt.parseFloat(f64, val) catch return error.InvalidValue;
     if (ms < 0 or ms > 1e9) return error.InvalidValue;
@@ -379,6 +390,32 @@ test "errors" {
         defer r.deinit(gpa);
         try std.testing.expectEqualStrings("eth0", r.opts.oiface.?);
     }
+}
+
+test "fuzz: option parser never crashes" {
+    // Runs as a smoke test under `zig build test`; becomes a real fuzz
+    // target with `zig build test --fuzz` (see scripts/fuzz.sh).
+    try std.testing.fuzz({}, fuzzParse, .{});
+}
+
+fn fuzzParse(_: void, smith: *std.testing.Smith) !void {
+    var buf: [256]u8 = undefined;
+    smith.bytes(&buf);
+    const len: usize = smith.valueRangeAtMost(u16, 0, buf.len);
+
+    // Split the byte soup on NUL into an argv-like token list.
+    var args_buf: [16][]const u8 = undefined;
+    var n: usize = 0;
+    var it = std.mem.splitScalar(u8, buf[0..len], 0);
+    while (it.next()) |tok| {
+        if (n == args_buf.len) break;
+        args_buf[n] = tok;
+        n += 1;
+    }
+
+    var diag: Diagnostic = .{};
+    var r = parse(std.testing.allocator, args_buf[0..n], &diag) catch return;
+    r.deinit(std.testing.allocator);
 }
 
 test "double dash ends options" {
