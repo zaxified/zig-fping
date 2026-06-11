@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      # Same entry point as local development: scripts/test.sh runs
+      # fmt --check, build, unit tests and the namespaced functional suite.
+      - name: Test pipeline
+        run: sh scripts/test.sh
+
+  # Zig cross-compiles to any Linux target out of the box — no
+  # cross-toolchains, sysroots or autotools triplets needed.
+  cross:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [aarch64-linux, riscv64-linux, x86_64-linux-musl]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - name: Cross-compile (${{ matrix.target }})
+        run: zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSafe

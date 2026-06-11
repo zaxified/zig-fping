@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "additionalDirectories": [
+      "~/.config/Code/User/globalStorage/ziglang.vscode-zig/zig/x86_64-linux-0.16.0",
+      "/tmp/fping-ref"
+    ],
+    "allow": [
+      "Bash(zig build *)",
+      "Bash(zig build)",
+      "Bash(zig test *)",
+      "Bash(zig fmt *)",
+      "Bash(zig version)",
+      "Bash(unshare -Urn *)",
+      "Bash(sh test/functional.sh*)",
+      "Read(~/.config/Code/User/globalStorage/ziglang.vscode-zig/zig/**)",
+      "Read(/tmp/fping-ref/**)"
+    ]
+  }
+}

@@ -1,0 +1,33 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      # Same artifacts as a local `scripts/release.sh` run.
+      - name: Build release artifacts
+        run: sh scripts/release.sh
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          gh release create "$GITHUB_REF_NAME" \
+            --title "zfping $GITHUB_REF_NAME" \
+            --notes "Static Linux binaries (no libc needed). See CHANGELOG.md for details." \
+            "releases/v$version"/zfping-*.tar.gz "releases/v$version/SHA256SUMS"

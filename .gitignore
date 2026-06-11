@@ -1,0 +1,6 @@
+.zig-cache/
+zig-out/
+.zig-toolchain/
+releases/
+.claude/settings.local.json
+*.code-workspace
