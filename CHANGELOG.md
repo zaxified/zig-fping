@@ -29,6 +29,9 @@ toolchain needed.
 - CI actions bumped to `actions/checkout@v5` (Node 24; v4's Node 20 is
   deprecated). Workflows gained least-privilege `permissions: contents: read`
   and `concurrency` cancel-in-progress.
+- The cross-compile check moved into the test job (one coherent Zig cache)
+  instead of a separate matrix that shared a single cache key, so all targets
+  cache and recompile consistently.
 
 ## 0.1.1 — golden-diff, syscall batching & compat fixes (2026-06-11)
 

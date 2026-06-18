@@ -38,20 +38,18 @@ jobs:
       - name: Test pipeline
         run: sh scripts/test.sh
 
-  # Zig cross-compiles to any Linux target out of the box — no
-  # cross-toolchains, sysroots or autotools triplets needed.
-  cross:
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        target: [aarch64-linux, riscv64-linux, x86_64-linux-musl]
-    steps:
-      - uses: actions/checkout@v5
-      - uses: mlugg/setup-zig@v2
-        with:
-          version: 0.16.0
-      - name: Cross-compile (${{ matrix.target }})
-        run: zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSafe
+      # Cross-compile every other supported target in the same job so they all
+      # share one coherent Zig cache, instead of a matrix that fought over a
+      # single cache key (one target hit, the rest missed). Zig cross-compiles
+      # out of the box — no sysroots or toolchains. Runs even if the test step
+      # failed, so a broken cross-compile still surfaces in the same run.
+      - name: Cross-compile
+        if: ${{ !cancelled() }}
+        run: |
+          for t in aarch64-linux riscv64-linux x86_64-linux-musl; do
+            echo "==> $t"
+            zig build -Dtarget="$t" -Doptimize=ReleaseSafe
+          done
 
   # Instrumented fuzzing runs only on manual dispatch: scripts/fuzz.sh forces
   # the LLVM backend (--release=safe) to dodge ziglang/zig#30655.
