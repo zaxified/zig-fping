@@ -6,9 +6,11 @@
 reusable library plus the `zfping` CLI.
 
 > **Note:** This project is a Claude (Fable 5) authored, automated rewrite of
-> fping, created for study purposes (all in one 5 hour session).
-> Agentic/AI-assisted pull requests are welcome — especially ones that keep
-> the port coherent with upstream fping (see [CONTRIBUTING.md](CONTRIBUTING.md)).
+> fping, created for study purposes — the complete fping→Zig migration up to
+> v0.1.1 was done in a single ~5 hour session. Development continues from
+> there (v0.1.2+) in the same agentic style. Agentic/AI-assisted pull requests
+> are welcome — especially ones that keep the port coherent with upstream
+> fping (see [CONTRIBUTING.md](CONTRIBUTING.md)).
 
 Built for high-volume ICMP monitoring (10k+ host checks per 5-minute cycle,
 e.g. as a backend for Nagios-like systems) with an emphasis on net-storm
@@ -59,10 +61,10 @@ identical flags, ReleaseSafe build — regenerate any time with
 
 | Scenario | zfping | fping 5.1 |
 | --- | --- | --- |
-| `-c 1 -i 1` (pacing-bound) | 2.23 s, 3% CPU | 2.26 s, 3% CPU |
-| `-c 1 -i 0.1` | 0.31 s, 11% CPU | 0.32 s, 14% CPU |
-| `-c 3 -i 0.1 -p 100` | 0.94 s, 10% CPU | 0.94 s, 12% CPU |
-| 250 silent targets `-i 0.1 -r 0 -t 100` | 0.14 s, 4% CPU | 0.14 s, 3% CPU |
+| `-c 1 -i 1` (pacing-bound) | 2.20 s, 3% CPU | 2.25 s, 3% CPU |
+| `-c 1 -i 0.1` | 0.31 s, 11% CPU | 0.32 s, 15% CPU |
+| `-c 3 -i 0.1 -p 100` | 0.94 s, 11% CPU | 0.95 s, 13% CPU |
+| 250 silent targets `-i 0.1 -r 0 -t 100` | 0.14 s, 5% CPU | 0.14 s, 3% CPU |
 
 Within noise of the original (slightly ahead in most runs), with ~1 MB
 extra RSS for the fixed sequence-slot table. Since 0.1.1 the engine
@@ -73,7 +75,7 @@ intentionally one packet per gap, keeping net-storm protection intact.
 
 ### Binary size
 
-The released `zfping` is ~480 KB versus fping's ~52 KB — but fping is
+The released `zfping` is ~470 KB versus fping's ~52 KB — but fping is
 dynamically linked against glibc (~2.2 MB shared), while zfping is fully
 static with zero runtime dependencies. By symbol breakdown, the port's own
 code is ~60 KB (on par with fping); the rest is the statically linked
@@ -86,7 +88,7 @@ the code paths that parse untrusted network bytes (ICMP and DNS replies),
 which is part of this port's value over the C original. The checks cost
 ~55 KB of the binary and no measurable speed (the benchmark above runs
 with them on). For embedded targets with tight flash budgets,
-`zig build -Doptimize=ReleaseSmall -Dstrip=true` produces a ~254 KB
+`zig build -Doptimize=ReleaseSmall -Dstrip=true` produces a ~248 KB
 binary — at the price of disabling those safety checks, so prefer
 ReleaseSafe wherever size is not critical.
 
@@ -186,7 +188,7 @@ anywhere) are published on the
 ```sh
 # adjust the version to the latest release tag
 curl -fsSL -o zfping.tar.gz \
-  https://github.com/zaxified/zig-fping/releases/download/v0.1.0/zfping-v0.1.0-x86_64-linux.tar.gz
+  https://github.com/zaxified/zig-fping/releases/download/v0.1.2/zfping-v0.1.2-x86_64-linux.tar.gz
 tar xzf zfping.tar.gz && ./zfping --help
 ```
 
@@ -257,7 +259,11 @@ and published artifacts are identical.
 | `seqmap.c` | `src/seqmap.zig` |
 | ICMP build/parse in `fping.c` | `src/icmp.zig` |
 | `main_loop()` in `fping.c` | `src/pinger.zig` (priority queues instead of linked lists) |
-| CLI / output (`fping.c`, `output.c`, `stats.c`, `optparse.c`) | `src/main.zig`, `src/cli/` |
+| CLI orchestration (arg handling / setup in `fping.c`) | `src/main.zig` |
+| option parsing (`optparse.c`) | `src/cli/options.zig` |
+| target generation `-g` (`add_cidr`/`add_range`) | `src/cli/generate.zig` |
+| per-probe & interval output (`output.c`) | `src/cli/output.zig` |
+| final statistics (`stats.c`) | `src/cli/stats.zig` |
 | libc `getnameinfo` (reverse DNS) | `src/rdns.zig` (pure-Zig PTR client) |
 | libc `localtime` | `src/tzlocal.zig` (/etc/localtime via std.tz) |
 

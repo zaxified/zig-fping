@@ -25,9 +25,10 @@ one network branch causes false DOWN states.
 - `zfping` must be as close to 100% fping-compatible as possible; anything
   that cannot be implemented must carry a code comment explaining why
   (see also CHANGELOG.md "Known divergences").
-- Released: **v0.1.0 "fping-complete-zig-port"**; v0.1.1 (golden-diff
-  suite, fuzz targets, sendmmsg/recvmmsg batching, compat fixes) is in
-  CHANGELOG.md as "unreleased" until tagged.
+- Released: **v0.1.0 "fping-complete-zig-port"**, **v0.1.1** (golden-diff
+  suite, fuzz targets, sendmmsg/recvmmsg batching, compat fixes), **v0.1.2**
+  (fuzzing unblocked on 0.16.0 via `--release=safe`, CI hardening, man page
+  install, `src/main.zig`→`src/cli/` split). See CHANGELOG.md.
 
 ## Upstream tracking (fping → zig-fping)
 

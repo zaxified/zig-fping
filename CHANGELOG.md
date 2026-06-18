@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.2 — fuzzing unblocked, CI hardening & src/cli split (2026-06-18)
 
 ### Fuzzing unblocked on Zig 0.16.0
 
@@ -28,10 +28,25 @@ toolchain needed.
   rebuilding it in the test step.
 - CI actions bumped to `actions/checkout@v5` (Node 24; v4's Node 20 is
   deprecated). Workflows gained least-privilege `permissions: contents: read`
-  and `concurrency` cancel-in-progress.
+  and `concurrency` cancel-in-progress. (`mlugg/setup-zig@v2` still declares
+  Node 20 but GitHub already force-runs it on Node 24, so it is left as is.)
 - The cross-compile check moved into the test job (one coherent Zig cache)
   instead of a separate matrix that shared a single cache key, so all targets
   cache and recompile consistently.
+- CI opens `net.ipv4.ping_group_range` before the tests so the embed-API
+  loopback unit test runs instead of self-skipping — the only place the
+  library's `prepare`/`step`/`pollFds` loop is exercised against a live socket.
+- The man page is installed by `build.zig` (`share/man/man8/zfping.8`), like
+  fping's `man_MANS`, so `zig build --prefix …` places it for `man zfping`.
+
+### Refactor
+
+- `src/main.zig` (the CLI, ~1080 lines) split into `src/cli/`: `context.zig`
+  (shared `Ctx`/`TargetState` and formatting helpers), `output.zig` (per-probe
+  and interval/netdata/JSON renderers), `stats.zig` (final per-system and
+  global reports) and `signals.zig`; `main.zig` keeps argument handling and
+  target resolution. Pure reorganization — output is byte-identical (the
+  golden suite passes unchanged).
 
 ## 0.1.1 — golden-diff, syscall batching & compat fixes (2026-06-11)
 

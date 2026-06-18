@@ -27,6 +27,10 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(exe);
 
+    // Man page, installed like fping's `man_MANS` (mandir/man8) so a
+    // `zig build --prefix /usr/local` lands it where `man zfping` finds it.
+    b.installFile("doc/zfping.8", "share/man/man8/zfping.8");
+
     const run_step = b.step("run", "Run zfping");
     const run_cmd = b.addRunArtifact(exe);
     run_step.dependOn(&run_cmd.step);
