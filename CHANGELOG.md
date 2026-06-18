@@ -16,7 +16,7 @@ toolchain needed.
   a hard failure.
 - CI gained an on-demand `fuzz` job (`workflow_dispatch` only — no corpus is
   persisted between runs, so a schedule would just re-explore the same shallow
-  space) running `scripts/fuzz.sh 600`.
+  space) running `scripts/fuzz.sh 60`.
 
 ### Build & CI
 

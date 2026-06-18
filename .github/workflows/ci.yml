@@ -32,6 +32,13 @@ jobs:
       - name: Install reference fping
         run: sudo apt-get update && sudo apt-get install -y fping
 
+      # Open ping_group_range so the embed-API unit test (opens an ICMP
+      # socket against loopback) actually runs instead of self-skipping; the
+      # runner otherwise denies unprivileged ICMP and `zig build test` reports
+      # one skipped test.
+      - name: Allow unprivileged ICMP sockets
+        run: sudo sysctl -w net.ipv4.ping_group_range="0 2147483647"
+
       # Same entry point as local development: scripts/test.sh runs
       # fmt --check, build, unit tests, the namespaced functional suite
       # and the golden-diff comparison against the reference fping.
@@ -61,5 +68,9 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
-      - name: Fuzz (10 min)
-        run: sh scripts/fuzz.sh 600
+      # Same as the test job: let the embed-API unit test open its ICMP
+      # socket so `zig build test --fuzz` runs all 46 tests, none skipped.
+      - name: Allow unprivileged ICMP sockets
+        run: sudo sysctl -w net.ipv4.ping_group_range="0 2147483647"
+      - name: Fuzz (60s)
+        run: sh scripts/fuzz.sh 60
