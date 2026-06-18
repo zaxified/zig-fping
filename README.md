@@ -32,7 +32,7 @@ it was ported from:
   generator, option parser and even the scheduler's pacing math have unit
   tests, and every test runs under a leak-detecting allocator.
 - **Fuzzing built into the toolchain.** `scripts/fuzz.sh` (a time-boxed
-  `zig build test --fuzz`) fuzzes the ICMP and DNS-response parsers — the
+  `zig build test --fuzz --release=safe`) fuzzes the ICMP and DNS-response parsers — the
   code paths that consume untrusted bytes from the network — plus the CLI
   option parser and `-g` target generation. In C this needs external
   harnesses (libFuzzer/AFL). The same fuzz bodies also run as smoke tests
@@ -45,8 +45,9 @@ it was ported from:
   pointer arithmetic over packet buffers; ReleaseSafe keeps the checks on
   in production.
 - **No autotools.** `build.zig` replaces configure.ac/Makefile.am, and
-  cross-compiling is one flag: `zig build -Dtarget=aarch64-linux`
-  (CI builds aarch64, riscv64 and musl variants on every push).
+  cross-compiling is just a target flag: `zig build -Dtarget=aarch64-linux
+  -Doptimize=ReleaseSafe` (CI builds aarch64, riscv64 and musl variants on
+  every push).
 - **One static binary, package-manager distribution.** No libc at all;
   consumers add the library with `zig fetch`.
 - **Better algorithmic scaling.** Priority queues (O(log n)) replace
@@ -195,7 +196,7 @@ tar xzf zfping.tar.gz && ./zfping --help
 Or build from source:
 
 ```sh
-zig build
+zig build -Doptimize=ReleaseSafe   # same build mode as the released binaries
 ./zig-out/bin/zfping -c 3 -i 5 192.0.2.1 2001:db8::1
 ./zig-out/bin/zfping -g 192.168.1.0/24 -a -q
 ./zig-out/bin/zfping --help
@@ -242,10 +243,10 @@ scripts/fuzz.sh      # time-boxed fuzzing of the parser fuzz targets
 Or directly with your own Zig 0.16.0:
 
 ```sh
-zig build              # library + zfping
-zig build test         # unit tests
-sh test/functional.sh  # functional suite (isolated user+net namespace)
-sh test/golden.sh      # byte-diff against an installed reference fping
+zig build -Doptimize=ReleaseSafe       # library + zfping (shipped build mode)
+zig build test -Doptimize=ReleaseSafe  # unit tests
+sh test/functional.sh                  # functional suite (isolated user+net namespace)
+sh test/golden.sh                      # byte-diff against an installed reference fping
 ```
 
 The GitHub release workflow runs the same `scripts/release.sh`, so local
