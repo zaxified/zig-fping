@@ -4,12 +4,23 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Instrumented fuzzing is run on demand (see the `fuzz` job): no corpus is
+  # persisted between CI runs, so a schedule would only re-explore the same
+  # shallow space over unchanged code. Trigger it after touching a parser.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Zig
         uses: mlugg/setup-zig@v2
@@ -35,9 +46,22 @@ jobs:
       matrix:
         target: [aarch64-linux, riscv64-linux, x86_64-linux-musl]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
       - name: Cross-compile (${{ matrix.target }})
         run: zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSafe
+
+  # Instrumented fuzzing runs only on manual dispatch: scripts/fuzz.sh forces
+  # the LLVM backend (--release=safe) to dodge ziglang/zig#30655.
+  fuzz:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - name: Fuzz (10 min)
+        run: sh scripts/fuzz.sh 600

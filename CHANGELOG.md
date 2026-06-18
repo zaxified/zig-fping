@@ -1,5 +1,35 @@
 # Changelog
 
+## Unreleased
+
+### Fuzzing unblocked on Zig 0.16.0
+
+Instrumented fuzzing works on the pinned toolchain after all. The blocker
+reported in 0.1.1 (`zig build test --fuzz` crashing in the fuzz runner) is
+ziglang/zig#30655: Zig 0.16.0's default self-hosted x86_64 backend mishandles
+the runner in debug mode (`*builtin.StackTrace` vs `*debug.StackTrace`).
+Forcing the LLVM backend with `--release=safe` sidesteps it — no patched
+toolchain needed.
+
+- `scripts/fuzz.sh` now runs `zig build test --fuzz --release=safe` and
+  treats a genuine `error:` (not the previously-expected build failure) as
+  a hard failure.
+- CI gained an on-demand `fuzz` job (`workflow_dispatch` only — no corpus is
+  persisted between runs, so a schedule would just re-explore the same shallow
+  space) running `scripts/fuzz.sh 600`.
+
+### Build & CI
+
+- The test pipeline (`scripts/test.sh`) now builds and runs everything
+  ReleaseSafe, the same optimize mode we ship, instead of Debug; the golden
+  and functional suites exercise the shipped optimize mode.
+- `scripts/release.sh` builds the native shipping binary once and runs the
+  pipeline against that exact stripped ReleaseSafe artifact, rather than
+  rebuilding it in the test step.
+- CI actions bumped to `actions/checkout@v5` (Node 24; v4's Node 20 is
+  deprecated). Workflows gained least-privilege `permissions: contents: read`
+  and `concurrency` cancel-in-progress.
+
 ## 0.1.1 — golden-diff, syscall batching & compat fixes (2026-06-11)
 
 ### Golden-diff test suite

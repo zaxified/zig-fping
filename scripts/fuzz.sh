@@ -5,12 +5,12 @@
 #
 # Usage: scripts/fuzz.sh [seconds]    (default: 300)
 #
-# KNOWN ISSUE: Zig 0.16.0 cannot compile its own fuzz test runner
-# (lib/compiler/test_runner.zig: *builtin.StackTrace vs *debug.StackTrace
-# mismatch), so instrumented fuzzing fails on the pinned toolchain. The
-# fuzz bodies still execute as smoke tests in every `zig build test`.
-# Re-run this script after the next .zigversion bump; wire it into CI
-# (scheduled job) once the toolchain compiles it.
+# Instrumented fuzzing is forced onto the LLVM backend with --release=safe:
+# Zig 0.16.0's default self-hosted x86_64 backend crashes the fuzz runner
+# in debug mode (ziglang/zig#30655, *builtin.StackTrace vs *debug.StackTrace).
+# --release=safe (or --release=fast) sidesteps it without a patched toolchain;
+# safe keeps the runtime checks the fuzzer wants. The fuzz bodies also run as
+# one-shot smoke tests in every plain `zig build test`.
 
 set -eu
 
@@ -20,17 +20,17 @@ REPO_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 . "$REPO_ROOT/scripts/zig-env.sh"
 cd "$REPO_ROOT"
 
-echo "==> fuzzing for ${SECONDS_TO_RUN}s (zig build test --fuzz)"
+echo "==> fuzzing for ${SECONDS_TO_RUN}s (zig build test --fuzz --release=safe)"
 log=$(mktemp)
 trap 'rm -f "$log"' EXIT
 
 # timeout exit 124 means the window elapsed without a crash — success.
 rc=0
-timeout "$SECONDS_TO_RUN" "$ZIG" build test --fuzz >"$log" 2>&1 || rc=$?
+timeout "$SECONDS_TO_RUN" "$ZIG" build test --fuzz --release=safe >"$log" 2>&1 || rc=$?
 sed 's/^/    /' "$log"
 
 if grep -q "error:" "$log"; then
-    echo "==> fuzz runner failed to build (expected on Zig 0.16.0, see header)"
+    echo "==> fuzz runner failed to build — inspect the log above"
     exit 1
 fi
 if [ "$rc" != 0 ] && [ "$rc" != 124 ]; then
