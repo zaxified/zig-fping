@@ -1,0 +1,90 @@
+name: upstream-check
+
+# Monthly check for new upstream fping commits that touch ported areas.
+# If any exist, open/update a single tracking issue for the human maintainer.
+# Uses the built-in GITHUB_TOKEN — no personal access token needed.
+
+on:
+  schedule:
+    # 06:17 UTC on the 1st of each month (off the :00 mark)
+    - cron: '17 6 1 * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout zig-fping
+        uses: actions/checkout@v4
+
+      - name: Determine pinned upstream commit
+        id: pin
+        run: |
+          PINNED=$(grep -oP 'Ported-from commit\*\*:\s*`\K[0-9a-f]{40}' CLAUDE.md)
+          if [ -z "$PINNED" ]; then
+            echo "::error::Could not find 'Ported-from commit' SHA in CLAUDE.md"
+            exit 1
+          fi
+          echo "pinned=$PINNED" >> "$GITHUB_OUTPUT"
+          echo "Pinned upstream commit: $PINNED"
+
+      - name: Clone upstream fping (full history)
+        run: git clone --no-tags https://github.com/schweikert/fping /tmp/fping-ref
+
+      - name: List new upstream commits touching ported areas
+        id: diff
+        run: |
+          PINNED='${{ steps.pin.outputs.pinned }}'
+          cd /tmp/fping-ref
+          if ! git cat-file -e "${PINNED}^{commit}" 2>/dev/null; then
+            echo "::error::Pinned commit $PINNED not found in upstream history"
+            exit 1
+          fi
+          LOG=$(git log --oneline "${PINNED}..origin/develop" -- src/ doc/)
+          COUNT=$(printf '%s' "$LOG" | grep -c . || true)
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+          {
+            echo 'log<<UPSTREAM_LOG_EOF'
+            printf '%s\n' "$LOG"
+            echo 'UPSTREAM_LOG_EOF'
+          } >> "$GITHUB_OUTPUT"
+          echo "New commits touching src/ or doc/: $COUNT"
+
+      - name: Open or update tracking issue
+        if: steps.diff.outputs.count != '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PINNED: ${{ steps.pin.outputs.pinned }}
+          COUNT: ${{ steps.diff.outputs.count }}
+          LOG: ${{ steps.diff.outputs.log }}
+        run: |
+          TITLE="upstream: $COUNT new fping commit(s) to review"
+          COMPARE="https://github.com/schweikert/fping/compare/${PINNED}...develop"
+          BODY_FILE="$RUNNER_TEMP/issue-body.md"
+          {
+            printf 'Automated upstream check (pinned `%s`).\n\n' "$PINNED"
+            printf '**%s** new upstream commit(s) touching `src/` or `doc/` since the pinned commit:\n\n' "$COUNT"
+            printf '```\n%s\n```\n\n' "$LOG"
+            printf 'Compare: %s\n\n' "$COMPARE"
+            printf 'Maintainer: review each commit, port relevant `src/` changes to Zig with tests '
+            printf '(file mapping table in README.md), add a CHANGELOG.md entry referencing the upstream '
+            printf 'hash, then bump the "Ported-from commit" SHA in CLAUDE.md.\n\n'
+            printf '<!-- upstream-check -->\n'
+          } > "$BODY_FILE"
+
+          # Idempotent label, then reuse an existing open tracking issue instead of spamming.
+          gh label create upstream-tracking --color FBCA04 \
+            --description "Upstream fping commits awaiting review" 2>/dev/null || true
+
+          EXISTING=$(gh issue list --label upstream-tracking --state open \
+            --json number --jq '.[0].number // empty')
+          if [ -n "$EXISTING" ]; then
+            gh issue edit "$EXISTING" --title "$TITLE" --body-file "$BODY_FILE"
+            echo "Updated existing tracking issue #$EXISTING"
+          else
+            gh issue create --title "$TITLE" --body-file "$BODY_FILE" --label upstream-tracking
+          fi
