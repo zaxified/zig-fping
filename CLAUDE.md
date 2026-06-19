@@ -47,10 +47,12 @@ project stays an "improved clone" of the C original.
      upstream commit hash, and bump the pinned SHA above.
 - Audit trail: record every reviewed upstream commit in CHANGELOG.md under
   the release that ported (or skipped) it.
-- Candidate automation (not set up yet): a scheduled Claude Code routine
-  (e.g. monthly `/schedule`) that fetches upstream, lists unreviewed commits
-  touching `src/`, and prepares a port proposal branch with failing/passing
-  tests; human review merges it.
+- Automation: `.github/workflows/upstream-check.yml` (GitHub Actions) runs
+  monthly (`cron: '17 6 1 * *'`) and on manual dispatch. It clones upstream
+  fping with full history, lists new commits touching `src/`/`doc/` since the
+  pinned SHA above, and opens (or updates) a single `upstream-tracking` issue
+  with the commit list and a compare link for the maintainer to review and
+  port. Uses the built-in `GITHUB_TOKEN` (no PAT).
 
 ## Environment
 
