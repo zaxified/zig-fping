@@ -1,8 +1,0 @@
-{
-  "mcpServers": {
-    "codedb": {
-      "command": "codedb",
-      "args": ["mcp"]
-    }
-  }
-}
