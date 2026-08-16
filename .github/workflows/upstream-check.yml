@@ -1,7 +1,12 @@
 name: upstream-check
 
-# Monthly check for new upstream fping commits that touch ported areas.
-# If any exist, open/update a single tracking issue for the human maintainer.
+# Monthly check against upstream fping, on two axes (see CLAUDE.md
+# "Upstream tracking"):
+#   1. develop commits touching ported areas since "Ported-from commit"
+#      -> open/update/close a single `upstream-tracking` issue;
+#   2. a newer release tag than "Compatible-with release"
+#      -> open an `upstream-release` issue, the trigger for porting the
+#         deferred CLI/output changes.
 # Uses the built-in GITHUB_TOKEN — no personal access token needed.
 
 on:
@@ -21,7 +26,7 @@ jobs:
       - name: Checkout zig-fping
         uses: actions/checkout@v4
 
-      - name: Determine pinned upstream commit
+      - name: Determine pinned upstream commit and release
         id: pin
         run: |
           PINNED=$(grep -oP 'Ported-from commit\*\*:\s*`\K[0-9a-f]{40}' CLAUDE.md)
@@ -29,11 +34,18 @@ jobs:
             echo "::error::Could not find 'Ported-from commit' SHA in CLAUDE.md"
             exit 1
           fi
+          RELEASE=$(grep -oP 'Compatible-with release\*\*:\s*`\Kv[0-9]+\.[0-9]+' CLAUDE.md)
+          if [ -z "$RELEASE" ]; then
+            echo "::error::Could not find 'Compatible-with release' tag in CLAUDE.md"
+            exit 1
+          fi
           echo "pinned=$PINNED" >> "$GITHUB_OUTPUT"
+          echo "release=$RELEASE" >> "$GITHUB_OUTPUT"
           echo "Pinned upstream commit: $PINNED"
+          echo "Compatible-with release: $RELEASE"
 
-      - name: Clone upstream fping (full history)
-        run: git clone --no-tags https://github.com/schweikert/fping /tmp/fping-ref
+      - name: Clone upstream fping (full history, with tags)
+        run: git clone https://github.com/schweikert/fping /tmp/fping-ref
 
       - name: List new upstream commits touching ported areas
         id: diff
@@ -87,4 +99,76 @@ jobs:
             echo "Updated existing tracking issue #$EXISTING"
           else
             gh issue create --title "$TITLE" --body-file "$BODY_FILE" --label upstream-tracking
+          fi
+
+      # An open tracking issue means "unreviewed upstream commits". Once the
+      # pin has caught up, close it — deferred work is tracked in CHANGELOG.md
+      # and re-surfaced by the release check below, not by a stale issue.
+      - name: Close tracking issue when everything is reviewed
+        if: steps.diff.outputs.count == '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PINNED: ${{ steps.pin.outputs.pinned }}
+        run: |
+          EXISTING=$(gh issue list --label upstream-tracking --state open \
+            --json number --jq '.[0].number // empty')
+          if [ -n "$EXISTING" ]; then
+            gh issue close "$EXISTING" --reason completed --comment \
+              "All upstream commits touching \`src/\`/\`doc/\` are reviewed as of pinned \`$PINNED\`. Deferred items (if any) are listed in CHANGELOG.md under \"Pending upstream (deferred)\"."
+            echo "Closed tracking issue #$EXISTING"
+          else
+            echo "Nothing new upstream, no open tracking issue."
+          fi
+
+      - name: Check for a newer upstream release
+        id: release
+        run: |
+          CURRENT='${{ steps.pin.outputs.release }}'
+          cd /tmp/fping-ref
+          # Release tags only — skip rc/pre-release tags.
+          LATEST=$(git tag --list 'v[0-9]*.[0-9]*' --sort=-v:refname \
+            | grep -Ex 'v[0-9]+\.[0-9]+' | head -1)
+          if [ -z "$LATEST" ]; then
+            echo "::error::Could not determine the latest upstream release tag"
+            exit 1
+          fi
+          echo "latest=$LATEST" >> "$GITHUB_OUTPUT"
+          if [ "$LATEST" = "$CURRENT" ]; then
+            echo "newer=0" >> "$GITHUB_OUTPUT"
+          else
+            echo "newer=1" >> "$GITHUB_OUTPUT"
+          fi
+          echo "Compatible-with: $CURRENT, latest upstream release: $LATEST"
+
+      - name: Open release issue when upstream released a new version
+        if: steps.release.outputs.newer == '1'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CURRENT: ${{ steps.pin.outputs.release }}
+          LATEST: ${{ steps.release.outputs.latest }}
+        run: |
+          TITLE="upstream release $LATEST — process deferred items"
+          COMPARE="https://github.com/schweikert/fping/compare/${CURRENT}...${LATEST}"
+          BODY_FILE="$RUNNER_TEMP/release-body.md"
+          {
+            printf 'fping **%s** is out; zfping declares compatibility with **%s**.\n\n' "$LATEST" "$CURRENT"
+            printf 'Compare: %s\n\n' "$COMPARE"
+            printf 'Maintainer checklist (CLAUDE.md "Upstream tracking"):\n\n'
+            printf '1. Implement the CHANGELOG.md "Pending upstream (deferred)" items that %s ships.\n' "$LATEST"
+            printf '2. Re-verify that develop-only features already ported here reached %s unrenamed.\n' "$LATEST"
+            printf '3. Refresh the golden-diff reference fping to %s where the environment allows.\n' "$LATEST"
+            printf '4. Bump "Compatible-with release" in CLAUDE.md to %s.\n\n' "$LATEST"
+            printf '<!-- upstream-release -->\n'
+          } > "$BODY_FILE"
+
+          gh label create upstream-release --color 0E8A16 \
+            --description "New upstream fping release to reconcile against" 2>/dev/null || true
+
+          EXISTING=$(gh issue list --label upstream-release --state open \
+            --json number --jq '.[0].number // empty')
+          if [ -n "$EXISTING" ]; then
+            gh issue edit "$EXISTING" --title "$TITLE" --body-file "$BODY_FILE"
+            echo "Updated existing release issue #$EXISTING"
+          else
+            gh issue create --title "$TITLE" --body-file "$BODY_FILE" --label upstream-release
           fi

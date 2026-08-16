@@ -1,5 +1,53 @@
 # Changelog
 
+## Unreleased
+
+### Upstream tracking policy
+
+The rule for *when* an upstream change is ported is now written down in
+CLAUDE.md instead of being decided ad hoc: bugfixes and correctness changes
+are ported as they land on `develop`, while **new CLI options and
+output-format changes wait until they appear in an upstream release tag**.
+The golden-diff suite can only diff against an installed (i.e. released)
+fping, distro packages are what "fping-compatible" is measured against, and
+an unreleased flag can still be renamed — as `--print-srcaddr` was, below.
+
+Two pins are now tracked: **Ported-from commit** (how far `develop` has been
+reviewed) and **Compatible-with release** (currently `v5.5`). The monthly
+`upstream-check` workflow closes its tracking issue once the review pin has
+caught up, and opens a separate `upstream-release` issue when upstream tags a
+new release — that is what triggers the deferred backlog.
+
+### Upstream commits reviewed
+
+Reviewed `develop` up to `bde54df` (2026-08-08); the previous pin was
+`780ec46` (2026-04-25). Everything between fping v5.5 and `780ec46` — the
+`--oiface` series, `20df7c6` (`ipi_spec_dst` from `-S`), `3f754df`
+(`ipi6_addr` in `IPV6_PKTINFO`), `977d47f` (crash with `-0`) and the upstream
+file-split refactors — was already covered by the 0.1.0 port, which was made
+from the `780ec46` tree.
+
+| upstream | change | disposition |
+| --- | --- | --- |
+| `292d56f` | new `--print-srcaddr`, plus a `src` field in JSON output | deferred |
+| `e269abd` | document the JSON `src` field | deferred |
+| `acb6579` | rename `--print-srcaddr` to `--print-reply-dst` | deferred |
+| `6731abf` | asymmetric IPv6 routing test for `--oiface` | n/a (upstream CI) |
+| `bde54df` | test tuning for `--print-reply-dst` | n/a (upstream CI) |
+
+### Pending upstream (deferred)
+
+To be implemented once the change reaches an upstream release tag
+(Compatible-with release is `v5.5`):
+
+- `--print-reply-dst` and the JSON `src` field (upstream `292d56f`,
+  `e269abd`, `acb6579`; unreleased as of v5.5). Prints the local address a
+  reply arrived on. `socket.zig` builds `IP_PKTINFO`/`IPV6_PKTINFO` only for
+  *sending* (`--oiface`); the receive path enables `RECVTTL`/`RECVTOS` but not
+  `IP_PKTINFO`/`IPV6_RECVPKTINFO`, so this needs the receive socket options,
+  cmsg parsing for the reply's destination address, and that address carried
+  through the reply struct into the renderers in `src/cli/output.zig`.
+
 ## 0.1.2 — fuzzing unblocked, CI hardening & src/cli split (2026-06-18)
 
 ### Fuzzing unblocked on Zig 0.16.0

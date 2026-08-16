@@ -32,27 +32,75 @@ one network branch causes false DOWN states.
 
 ## Upstream tracking (fping → zig-fping)
 
-The port is pinned to an upstream fping commit; fixes and features landing
-in fping should be reviewed periodically and re-implemented here so the
-project stays an "improved clone" of the C original.
+The port tracks upstream fping so the project stays an "improved clone" of
+the C original. Upstream has no stable branch — `develop` is the mainline and
+releases are tagged off it, roughly once or twice a year (v5.5: 2025-12-31,
+v5.4: 2025-08-19, v5.3: 2025-01-02).
 
-- **Ported-from commit**: `780ec46747803f89ef02b841785a7518110b75b8`
-  (fping develop, 2026-04-25).
-- Update procedure:
-  1. `git -C /tmp/fping-ref fetch origin && git -C /tmp/fping-ref log --oneline 780ec46..origin/develop -- src/ doc/`
-  2. For each new commit, decide: port / not applicable (autotools, CI,
-     platforms we don't support) / defer. Use the file mapping table in
-     README.md (socket4.c→socket.zig, seqmap.c→seqmap.zig, …).
-  3. Port semantic changes with tests, add a CHANGELOG entry referencing the
-     upstream commit hash, and bump the pinned SHA above.
-- Audit trail: record every reviewed upstream commit in CHANGELOG.md under
-  the release that ported (or skipped) it.
-- Automation: `.github/workflows/upstream-check.yml` (GitHub Actions) runs
-  monthly (`cron: '17 6 1 * *'`) and on manual dispatch. It clones upstream
-  fping with full history, lists new commits touching `src/`/`doc/` since the
-  pinned SHA above, and opens (or updates) a single `upstream-tracking` issue
-  with the commit list and a compare link for the maintainer to review and
-  port. Uses the built-in `GITHUB_TOKEN` (no PAT).
+Two pins are maintained here:
+
+- **Ported-from commit**: `bde54df55b724988fa268249fc9e14c08f3013fd`
+  (fping develop, 2026-08-08) — how far develop has been *reviewed*. Advances
+  on every review round, even when nothing gets ported.
+- **Compatible-with release**: `v5.5` — the newest fping *release* whose CLI
+  and output surface zfping fully implements.
+
+### Porting policy
+
+Not everything on `develop` is ported when it lands. The deciding question is
+whether a change touches the public CLI/output contract, not whether it has
+been released:
+
+| upstream change | action |
+| --- | --- |
+| bugfix, protocol/behaviour correctness | port immediately |
+| performance / internals | port if it fits the Zig design |
+| upstream-internal refactor (file splits, decl moves) | skip — our layout is our own (mapping table in README.md) |
+| **new CLI option or output-format change** | **defer until it appears in an upstream release tag** |
+| autotools, upstream CI, unsupported platforms | not applicable |
+
+Why CLI/output changes wait for a release:
+
+1. `test/golden.sh` diffs against an *installed* reference fping, which is
+   always a release — an unreleased flag has nothing to diff against.
+2. "fping-compatible" is measured against the fping users actually have
+   installed (distro packages), not against yesterday's develop HEAD.
+3. The deployment target is monitoring 10k+ hosts; a flag renamed before
+   release breaks production configs for something upstream never shipped.
+   Not hypothetical: `292d56f` added `--print-srcaddr`, `acb6579` renamed it
+   to `--print-reply-dst` two commits later.
+
+Escape hatch: a deferred item may be ported early if it is genuinely needed
+and has been stable on develop for a few months.
+
+### Procedure
+
+1. `git -C /tmp/fping-ref fetch origin && git -C /tmp/fping-ref log --oneline <pinned>..origin/develop -- src/ doc/`
+2. Give every commit a disposition — **ported / skipped / deferred / n-a** —
+   using the file mapping table in README.md (socket4.c→socket.zig,
+   seqmap.c→seqmap.zig, …).
+3. Port what is due, with tests; record every reviewed commit and its
+   disposition in CHANGELOG.md, and advance **Ported-from commit** to the
+   reviewed develop head (even if nothing was ported).
+4. Deferred items live in the "Pending upstream (deferred)" section of
+   CHANGELOG.md until the release that ships them.
+5. On a new upstream release: implement the deferred items, **re-verify that
+   already-ported develop-only features survived into the release unrenamed**
+   (`--oiface` and friends), then bump **Compatible-with release**.
+
+### Automation
+
+`.github/workflows/upstream-check.yml` (GitHub Actions) runs monthly
+(`cron: '17 6 1 * *'`) and on manual dispatch, using the built-in
+`GITHUB_TOKEN` (no PAT). It clones upstream fping with full history and:
+
+- lists commits touching `src/`/`doc/` since **Ported-from commit**, then
+  opens (or updates) a single `upstream-tracking` issue with the commit list
+  and a compare link — and closes that issue once the range is empty, so an
+  open issue always means "unreviewed commits";
+- compares **Compatible-with release** with the newest upstream release tag
+  and opens an `upstream-release` issue when a newer one exists — that issue
+  is the trigger for working through the deferred backlog.
 
 ## Environment
 
