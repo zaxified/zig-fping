@@ -117,6 +117,10 @@ cycle of 10k checks per 5 minutes uses well under 1% of that.
 zig fetch --save git+https://github.com/zaxified/zig-fping
 ```
 
+`main` follows the current Zig release. **v0.1.3 is the last release for
+Zig 0.16** — pin it if your project stays on 0.16
+(`zig fetch --save git+https://github.com/zaxified/zig-fping#v0.1.3`).
+
 ```zig
 // build.zig
 const fping_dep = b.dependency("zig_fping", .{ .target = target, .optimize = optimize });
@@ -189,7 +193,7 @@ anywhere) are published on the
 ```sh
 # adjust the version to the latest release tag
 curl -fsSL -o zfping.tar.gz \
-  https://github.com/zaxified/zig-fping/releases/download/v0.1.2/zfping-v0.1.2-x86_64-linux.tar.gz
+  https://github.com/zaxified/zig-fping/releases/download/v0.1.3/zfping-v0.1.3-x86_64-linux.tar.gz
 tar xzf zfping.tar.gz && ./zfping --help
 ```
 

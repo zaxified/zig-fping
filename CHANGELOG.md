@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+### Pending upstream (deferred)
+
+To be implemented once the change reaches an upstream release tag
+(Compatible-with release is `v5.5`):
+
+- `--print-reply-dst` and the JSON `src` field (upstream `292d56f`,
+  `e269abd`, `acb6579`, IPv6 in `8163e28`; unreleased as of v5.5). Prints
+  the local address a reply arrived on, for both IPv4 and IPv6. `socket.zig`
+  builds `IP_PKTINFO`/`IPV6_PKTINFO` only for *sending* (`--oiface`); the
+  receive path enables `RECVTTL`/`RECVTOS` but not
+  `IP_PKTINFO`/`IPV6_RECVPKTINFO`, so this needs the receive socket options,
+  cmsg parsing for the reply's destination address, and that address carried
+  through the reply struct into the renderers in `src/cli/output.zig`.
+
+## 0.1.3 — last release for Zig 0.16 (2026-10-18)
+
+**This is the last zig-fping release that builds with Zig 0.16.** `main`
+moves to Zig 0.17 next (0.2.0). Projects that stay on Zig 0.16 should pin
+this tag:
+
+```sh
+zig fetch --save git+https://github.com/zaxified/zig-fping#v0.1.3
+```
+
+No fixes are planned for the 0.16 line.
+
 ### Upstream tracking policy
 
 The rule for *when* an upstream change is ported is now written down in
@@ -51,19 +77,6 @@ Second round (2026-10-18): reviewed `develop` up to `8163e28` (committed
 | --- | --- | --- |
 | `48cb332` | open ICMP sockets with `IPPROTO_ICMP`/`IPPROTO_ICMPV6` instead of `getprotobyname()` (missing on Android) | n/a — `socket.zig` has always used the `linux.IPPROTO` constants (no libc) |
 | `8163e28` | IPv6 support for `--print-reply-dst` | deferred |
-
-### Pending upstream (deferred)
-
-To be implemented once the change reaches an upstream release tag
-(Compatible-with release is `v5.5`):
-
-- `--print-reply-dst` and the JSON `src` field (upstream `292d56f`,
-  `e269abd`, `acb6579`, IPv6 in `8163e28`; unreleased as of v5.5). Prints
-  the local address a reply arrived on, for both IPv4 and IPv6. `socket.zig` builds `IP_PKTINFO`/`IPV6_PKTINFO` only for
-  *sending* (`--oiface`); the receive path enables `RECVTTL`/`RECVTOS` but not
-  `IP_PKTINFO`/`IPV6_RECVPKTINFO`, so this needs the receive socket options,
-  cmsg parsing for the reply's destination address, and that address carried
-  through the reply struct into the renderers in `src/cli/output.zig`.
 
 ## 0.1.2 — fuzzing unblocked, CI hardening & src/cli split (2026-06-18)
 
