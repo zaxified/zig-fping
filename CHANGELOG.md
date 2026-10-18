@@ -35,14 +35,22 @@ from the `780ec46` tree.
 | `6731abf` | asymmetric IPv6 routing test for `--oiface` | n/a (upstream CI) |
 | `bde54df` | test tuning for `--print-reply-dst` | n/a (upstream CI) |
 
+Second round (2026-10-18): reviewed `develop` up to `8163e28` (committed
+2026-08-09, the develop head); fping v5.5 is still the newest release.
+
+| upstream | change | disposition |
+| --- | --- | --- |
+| `48cb332` | open ICMP sockets with `IPPROTO_ICMP`/`IPPROTO_ICMPV6` instead of `getprotobyname()` (missing on Android) | n/a — `socket.zig` has always used the `linux.IPPROTO` constants (no libc) |
+| `8163e28` | IPv6 support for `--print-reply-dst` | deferred |
+
 ### Pending upstream (deferred)
 
 To be implemented once the change reaches an upstream release tag
 (Compatible-with release is `v5.5`):
 
 - `--print-reply-dst` and the JSON `src` field (upstream `292d56f`,
-  `e269abd`, `acb6579`; unreleased as of v5.5). Prints the local address a
-  reply arrived on. `socket.zig` builds `IP_PKTINFO`/`IPV6_PKTINFO` only for
+  `e269abd`, `acb6579`, IPv6 in `8163e28`; unreleased as of v5.5). Prints
+  the local address a reply arrived on, for both IPv4 and IPv6. `socket.zig` builds `IP_PKTINFO`/`IPV6_PKTINFO` only for
   *sending* (`--oiface`); the receive path enables `RECVTTL`/`RECVTOS` but not
   `IP_PKTINFO`/`IPV6_RECVPKTINFO`, so this needs the receive socket options,
   cmsg parsing for the reply's destination address, and that address carried

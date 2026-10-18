@@ -39,8 +39,8 @@ v5.4: 2025-08-19, v5.3: 2025-01-02).
 
 Two pins are maintained here:
 
-- **Ported-from commit**: `bde54df55b724988fa268249fc9e14c08f3013fd`
-  (fping develop, 2026-08-08) — how far develop has been *reviewed*. Advances
+- **Ported-from commit**: `8163e2813ad381df3593eb2b53018971c7e530b8`
+  (fping develop, 2026-08-09) — how far develop has been *reviewed*. Advances
   on every review round, even when nothing gets ported.
 - **Compatible-with release**: `v5.5` — the newest fping *release* whose CLI
   and output surface zfping fully implements.
