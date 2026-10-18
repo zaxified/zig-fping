@@ -198,6 +198,14 @@ while (try pinger.step()) |deadline_mono_ns| {
 }
 ```
 
+### Example application
+
+[`example-apps/fping-watch`](example-apps/fping-watch) is a small ping
+monitor built on the library: a daemon that pings a handful of targets every
+minute and serves a web page with 24 hours of status, latency and loss, with
+pause and Nagios-style acknowledgements, and a `--read-only` mode for public
+demos. It is its own package and shows how a consumer depends on `zig_fping`.
+
 ## CLI
 
 `zfping` is a thin shell over the library, compatible with fping options,

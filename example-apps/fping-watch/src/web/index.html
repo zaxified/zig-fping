@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>fping-watch</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <span class="logo" aria-hidden="true"></span>
+      <h1>fping-watch</h1>
+      <span id="mode" class="tag" hidden>read-only demo</span>
+    </div>
+    <div id="summary" class="summary"></div>
+  </header>
+
+  <main>
+    <section id="targets" class="targets" aria-live="polite">
+      <p class="empty">Loading…</p>
+    </section>
+
+    <form id="add" class="add" hidden>
+      <input name="name" placeholder="Name" maxlength="64" required>
+      <input name="host" placeholder="IP address or host name" maxlength="253" required>
+      <button type="submit">Add target</button>
+      <span id="add-error" class="error" role="alert"></span>
+    </form>
+  </main>
+
+  <footer>
+    <span id="updated"></span>
+    · built with <a href="https://github.com/zaxified/zig-fping">zig-fping</a>
+  </footer>
+
+  <template id="row">
+    <article class="target">
+      <button class="head" type="button" aria-expanded="false">
+        <span class="badge"></span>
+        <span class="who"><span class="name"></span><span class="host"></span></span>
+        <span class="beats" aria-hidden="true"></span>
+        <span class="figures"><span class="uptime"></span><span class="latency"></span></span>
+      </button>
+      <div class="detail" hidden>
+        <div class="chart"></div>
+        <div class="stats"></div>
+        <div class="actions"></div>
+      </div>
+    </article>
+  </template>
+</body>
+</html>

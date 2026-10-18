@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Example application: fping-watch
+
+`example-apps/fping-watch` (proof of concept): a ping monitor daemon on top
+of the library. It probes a JSON list of targets once a minute in one paced
+`Pinger` round and serves a web page (std `http.Server`, embedded HTML/JS,
+no dependencies) with 24 hours of status, latency and loss per target. Targets
+can be added, removed and paused; a DOWN target can be acknowledged, Nagios
+style, until 5 cycles in a row are not DOWN. `--read-only` refuses every
+change for a public demo. A separate package depending on this checkout by
+path; `scripts/test.sh` runs its unit tests and an end-to-end smoke test in a
+network namespace.
+
 ### Zig 0.17
 
 zig-fping now requires **Zig 0.17.0** (`minimum_zig_version`, `.zigversion`,
