@@ -141,7 +141,7 @@ fn formatTimestamp(buf: []u8, now_ns: i64, format: options_mod.TimestampFormat, 
             const month_names = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
             // Weekday from epoch day (1970-01-01 was a Thursday).
             const weekday_names = [_][]const u8{ "Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed" };
-            const weekday = weekday_names[day.day % 7];
+            const weekday = weekday_names[@intCast(day.day % 7)];
             w.print("{s} {s} {d:2} {d:0>2}:{d:0>2}:{d:0>2} {d}", .{
                 weekday, month_names[month - 1], dom, hour, minute, second, year,
             }) catch unreachable;

@@ -8,7 +8,6 @@
 const std = @import("std");
 const linux = std.os.linux;
 const netutil = @import("netutil.zig");
-const HostName = std.Io.net.HostName;
 
 pub const Address = union(enum) {
     v4: [4]u8,
@@ -119,6 +118,50 @@ fn buildQuery(buf: []u8, id: u16, addr: Address) usize {
     return end + 4;
 }
 
+/// Decompress a DNS name starting at `start` (RFC 1035 4.1.4) into `out`
+/// as dotted text. Returns the bytes consumed at `start` and the name.
+///
+/// std.Io.net.HostName.expand cannot be used here: it validates the result
+/// as an RFC 1123 host name, so legal DNS owner names such as RFC 2317
+/// classless delegations ("5.0/26.2.0.192.in-addr.arpa") or PTR targets
+/// with underscores made the whole lookup fail, while fping's
+/// getnameinfo() returns them.
+fn expandName(packet: []const u8, start: usize, out: []u8) ?struct { usize, []const u8 } {
+    var i = start;
+    var len: usize = 0;
+    var consumed: ?usize = null;
+    // Every length byte read after a pointer jump must lie before that
+    // pointer, so pointer positions strictly decrease: the walk terminates
+    // and reference loops (or forward pointers, which RFC 1035 does not
+    // allow: "a prior occurance") are rejected.
+    var limit = packet.len;
+    while (true) {
+        if (i >= limit) return null;
+        const c = packet[i];
+        switch (c & 0xc0) {
+            0xc0 => {
+                if (i + 1 >= packet.len) return null;
+                const target = (@as(usize, c & 0x3f) << 8) | packet[i + 1];
+                if (consumed == null) consumed = i + 2 - start;
+                limit = i;
+                i = target;
+            },
+            0x00 => {
+                if (c == 0) return .{ consumed orelse i + 1 - start, out[0..len] };
+                const label_len: usize = c;
+                if (i + 1 + label_len > packet.len) return null;
+                const dot: usize = @intFromBool(len != 0);
+                if (len + dot + label_len > out.len) return null;
+                if (dot != 0) out[len] = '.';
+                @memcpy(out[len + dot ..][0..label_len], packet[i + 1 ..][0..label_len]);
+                len += dot + label_len;
+                i += 1 + label_len;
+            },
+            else => return null, // 0x40/0x80: reserved label types
+        }
+    }
+}
+
 /// Parse a DNS response, returning the first PTR answer name.
 fn parseResponse(packet: []const u8, id: u16, out: []u8) ?[]const u8 {
     if (packet.len < 12) return null;
@@ -129,16 +172,16 @@ fn parseResponse(packet: []const u8, id: u16, out: []u8) ?[]const u8 {
     var ancount = std.mem.readInt(u16, packet[6..8], .big);
 
     var i: usize = 12;
-    var name_buf: [HostName.max_len]u8 = undefined;
+    var name_buf: [max_name_len]u8 = undefined;
 
     var q: u16 = 0;
     while (q < qdcount) : (q += 1) {
-        const consumed, _ = HostName.expand(packet, i, &name_buf) catch return null;
+        const consumed, _ = expandName(packet, i, &name_buf) orelse return null;
         i += consumed + 4; // skip QNAME + QTYPE + QCLASS
     }
 
     while (ancount > 0) : (ancount -= 1) {
-        const consumed, _ = HostName.expand(packet, i, &name_buf) catch return null;
+        const consumed, _ = expandName(packet, i, &name_buf) orelse return null;
         i += consumed;
         if (i + 10 > packet.len) return null;
         const rr_type = std.mem.readInt(u16, packet[i..][0..2], .big);
@@ -146,15 +189,17 @@ fn parseResponse(packet: []const u8, id: u16, out: []u8) ?[]const u8 {
         i += 10;
         if (i + rdlength > packet.len) return null;
         if (rr_type == qtype_ptr) {
-            _, const host = HostName.expand(packet, i, &name_buf) catch return null;
-            if (host.bytes.len > out.len) return null;
-            @memcpy(out[0..host.bytes.len], host.bytes);
-            return out[0..host.bytes.len];
+            _, const host = expandName(packet, i, out) orelse return null;
+            if (host.len == 0) return null; // root name: nothing to print
+            return host;
         }
         i += rdlength;
     }
     return null;
 }
+
+/// Longest dotted text of a wire-format name (255 octets on the wire).
+const max_name_len = 254;
 
 const Nameserver = union(enum) {
     v4: linux.sockaddr.in,
@@ -218,8 +263,9 @@ fn lookupDns(addr: Address, out: []u8, opts: Options) ?[]const u8 {
 
         var fds = [_]linux.pollfd{.{ .fd = fd, .events = linux.POLL.IN, .revents = 0 }};
         var wait: linux.timespec = .{
-            .sec = opts.timeout_ms / 1000,
-            .nsec = @as(isize, opts.timeout_ms % 1000) * std.time.ns_per_ms,
+            // u32 ms: secs <= 4_294_967 and nsec < 1e9, both fit a 32-bit isize.
+            .sec = @intCast(opts.timeout_ms / 1000),
+            .nsec = @as(isize, @intCast(opts.timeout_ms % 1000)) * std.time.ns_per_ms,
         };
         const poll_rc = linux.ppoll(&fds, 1, &wait, null);
         if (linux.errno(poll_rc) != .SUCCESS or poll_rc == 0) continue;
@@ -284,10 +330,68 @@ test "response parsing" {
     try std.testing.expectEqual(@as(?[]const u8, null), parseResponse(resp[0..i], 0xbeee, &out));
 }
 
-test "hosts file lookup" {
+test "PTR names that are not RFC 1123 host names still resolve" {
+    // RFC 2317 classless delegation: the PTR owner is a CNAME target with
+    // a '/' label; the PTR target has an underscore. Both are legal DNS.
+    var query: [512]u8 = undefined;
+    const qlen = buildQuery(&query, 0x1234, .{ .v4 = .{ 192, 0, 2, 5 } });
+    var resp: [512]u8 = undefined;
+    @memcpy(resp[0..qlen], query[0..qlen]);
+    resp[2] |= 0x80;
+    std.mem.writeInt(u16, resp[6..8], 1, .big);
+    var i = qlen;
+    const owner = "\x015\x040/26\x012\x010\x03192\x07in-addr\x04arpa\x00";
+    @memcpy(resp[i..][0..owner.len], owner);
+    i += owner.len;
+    std.mem.writeInt(u16, resp[i..][0..2], qtype_ptr, .big);
+    std.mem.writeInt(u16, resp[i + 2 ..][0..2], qclass_in, .big);
+    std.mem.writeInt(u32, resp[i + 4 ..][0..4], 60, .big);
+    const rdata = "\x07my_host\x07example\x00";
+    std.mem.writeInt(u16, resp[i + 8 ..][0..2], rdata.len, .big);
+    @memcpy(resp[i + 10 ..][0..rdata.len], rdata);
+    i += 10 + rdata.len;
+
     var out: [256]u8 = undefined;
-    // Most systems map 127.0.0.1 in /etc/hosts; tolerate absence.
-    _ = lookupHostsFile(.{ .v4 = .{ 127, 0, 0, 1 } }, &out, "/etc/hosts");
+    try std.testing.expectEqualStrings("my_host.example", parseResponse(resp[0..i], 0x1234, &out).?);
+}
+
+test "name expansion rejects pointer loops and truncation" {
+    var out: [256]u8 = undefined;
+    // Self-pointer and forward pointer loops.
+    try std.testing.expect(expandName(&.{ 0xc0, 0x00 }, 0, &out) == null);
+    try std.testing.expect(expandName(&.{ 0xc0, 0x02, 0xc0, 0x00 }, 0, &out) == null);
+    // Label running past the end.
+    try std.testing.expect(expandName(&.{ 0x05, 'a', 'b' }, 0, &out) == null);
+    // Pointer to an earlier name: consumed counts only the pointer.
+    const pkt = [_]u8{ 0x01, 'a', 0x00, 0x01, 'b', 0xc0, 0x00 };
+    const consumed, const name = expandName(&pkt, 3, &out).?;
+    try std.testing.expectEqual(@as(usize, 4), consumed);
+    try std.testing.expectEqualStrings("b.a", name);
+}
+
+test "hosts file lookup" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const hosts_fixture =
+        \\# comment line
+        \\127.0.0.1   localhost.test loopback # trailing comment
+        \\::1         ip6-localhost.test
+        \\192.0.2.7   nodename.test
+        \\
+    ;
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "hosts", .data = hosts_fixture });
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPathFile(std.testing.io, "hosts", &path_buf);
+    path_buf[n] = 0;
+    const path: [:0]const u8 = path_buf[0..n :0];
+
+    var out: [256]u8 = undefined;
+    try std.testing.expectEqualStrings("localhost.test", lookupHostsFile(.{ .v4 = .{ 127, 0, 0, 1 } }, &out, path).?);
+    try std.testing.expectEqualStrings("nodename.test", lookupHostsFile(.{ .v4 = .{ 192, 0, 2, 7 } }, &out, path).?);
+    var lo6: [16]u8 = @splat(0);
+    lo6[15] = 1;
+    try std.testing.expectEqualStrings("ip6-localhost.test", lookupHostsFile(.{ .v6 = lo6 }, &out, path).?);
+    try std.testing.expectEqual(@as(?[]const u8, null), lookupHostsFile(.{ .v4 = .{ 192, 0, 2, 99 } }, &out, path));
 }
 
 test "fuzz: DNS response parser never crashes" {

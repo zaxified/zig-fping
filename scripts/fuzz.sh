@@ -5,12 +5,12 @@
 #
 # Usage: scripts/fuzz.sh [seconds]    (default: 300)
 #
-# Instrumented fuzzing is forced onto the LLVM backend with --release=safe:
-# Zig 0.16.0's default self-hosted x86_64 backend crashed the fuzz runner
-# in debug mode (ziglang/zig#30655, *builtin.StackTrace vs *debug.StackTrace),
-# and fuzzing belongs on LLVM anyway. --release=safe keeps the runtime checks
-# the fuzzer wants (--release takes only the new mode names on Zig 0.17). The fuzz bodies also run as
-# one-shot smoke tests in every plain `zig build test`.
+# Instrumented fuzzing runs on the LLVM backend with --release=safe, like every
+# other compile step here (Zig 0.16.0's self-hosted x86_64 backend crashed the
+# fuzz runner in debug mode, ziglang/zig#30655). --release=safe keeps the
+# runtime checks the fuzzer wants (--release takes only the new mode names
+# fast/safe/small on Zig 0.17). The fuzz bodies also run as one-shot smoke
+# tests in every plain `zig build test`.
 
 set -eu
 

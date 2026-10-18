@@ -53,13 +53,19 @@ jobs:
       - name: Cross-compile
         if: ${{ !cancelled() }}
         run: |
-          for t in aarch64-linux riscv64-linux x86_64-linux-musl; do
+          for t in aarch64-linux riscv64-linux x86_64-linux-musl x86-linux arm-linux riscv32-linux; do
             echo "==> $t"
             zig build -Dtarget="$t" -Doptimize=ReleaseSafe
           done
 
-  # Instrumented fuzzing runs only on manual dispatch: scripts/fuzz.sh forces
-  # the LLVM backend (--release=safe) to dodge ziglang/zig#30655.
+      # 32-bit x86 binaries run natively on the x86_64 runner, so the unit
+      # tests also cover 32-bit usize/isize and the 32-bit syscall ABI.
+      - name: Unit tests (x86 32-bit)
+        if: ${{ !cancelled() }}
+        run: zig build test -Dtarget=x86-linux -Doptimize=ReleaseSafe --summary all
+
+  # Instrumented fuzzing runs only on manual dispatch: scripts/fuzz.sh runs
+  # on the LLVM backend (--release=safe), like every other CI step.
   fuzz:
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
@@ -69,7 +75,7 @@ jobs:
         with:
           version: 0.17.0
       # Same as the test job: let the embed-API unit test open its ICMP
-      # socket so `zig build test --fuzz` runs all 46 tests, none skipped.
+      # socket so `zig build test --fuzz` runs every test, none skipped.
       - name: Allow unprivileged ICMP sockets
         run: sudo sysctl -w net.ipv4.ping_group_range="0 2147483647"
       - name: Fuzz (60s)

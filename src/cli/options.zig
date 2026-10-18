@@ -10,13 +10,17 @@ pub const Options = struct {
     // Probing
     ipv4_only: bool = false, // -4
     ipv6_only: bool = false, // -6
-    size: u16 = 56, // -b
+    /// -b; range-checked against fping's MAX_PING_DATA in main.validate.
+    size: u32 = 56, // -b
+    /// -b given explicitly (fping size_flag: rejected with --icmp-timestamp).
+    size_set: bool = false,
     backoff: f32 = 1.5, // -B
     count: ?u32 = null, // -c / -C (fping: both set opt_count, last one wins)
     report_all_rtts: bool = false, // -C (verbose per-probe RTT table)
     file: ?[]const u8 = null, // -f ("-" = stdin)
     generate: bool = false, // -g
-    ttl: ?u8 = null, // -H
+    /// -H; 0 is a usage error, > 255 is reported by main.validate like fping.
+    ttl: ?u32 = null, // -H
     interval_ns: u64 = 10 * std.time.ns_per_ms, // -i
     iface: ?[]const u8 = null, // -I
     oiface: ?[]const u8 = null, // --oiface
@@ -173,7 +177,10 @@ fn applyShortFlag(o: *Options, c: u8) ParseError!void {
 fn applyShortValue(o: *Options, c: u8, val: []const u8, diag: *Diagnostic) ParseError!void {
     diag.text = val;
     switch (c) {
-        'b' => o.size = std.fmt.parseInt(u16, val, 10) catch return error.InvalidValue,
+        'b' => {
+            o.size = std.fmt.parseInt(u32, val, 10) catch return error.InvalidValue;
+            o.size_set = true;
+        },
         'B' => o.backoff = std.fmt.parseFloat(f32, val) catch return error.InvalidValue,
         // fping rejects a zero count/threshold with usage(1).
         'c' => o.count = try parseNonZero(val),
@@ -182,7 +189,8 @@ fn applyShortValue(o: *Options, c: u8, val: []const u8, diag: *Diagnostic) Parse
             o.report_all_rtts = true;
         },
         'f' => o.file = val,
-        'H' => o.ttl = std.fmt.parseInt(u8, val, 10) catch return error.InvalidValue,
+        // fping: ttl 0 -> usage(1); > 255 -> "ttl N out of range" (main.validate).
+        'H' => o.ttl = try parseNonZero(val),
         'i' => o.interval_ns = try parseMs(val),
         'I' => o.iface = val,
         'k' => o.fwmark = std.fmt.parseInt(u32, val, 10) catch return error.InvalidValue,
@@ -329,7 +337,10 @@ fn parseNonZero(val: []const u8) ParseError!u32 {
 
 fn parseMs(val: []const u8) ParseError!u64 {
     const ms = std.fmt.parseFloat(f64, val) catch return error.InvalidValue;
-    if (ms < 0 or ms > 1e9) return error.InvalidValue;
+    // NaN passes both range checks and would make @intFromFloat panic.
+    // fping's strtod_strict accepts "nan" and converts it with undefined
+    // behaviour; rejecting it as a usage error is the defined equivalent.
+    if (std.math.isNan(ms) or ms < 0 or ms > 1e9) return error.InvalidValue;
     return @intFromFloat(ms * std.time.ns_per_ms);
 }
 
@@ -341,7 +352,7 @@ fn parseSquiet(o: *Options, val: []const u8) ParseError!void {
         spec = spec[0..comma];
     }
     const secs = std.fmt.parseFloat(f64, spec) catch return error.InvalidValue;
-    if (secs <= 0 or secs > 1e6) return error.InvalidValue;
+    if (std.math.isNan(secs) or secs <= 0 or secs > 1e6) return error.InvalidValue;
     o.squiet_ns = @intFromFloat(secs * std.time.ns_per_s);
     o.quiet = true;
 }
@@ -425,4 +436,27 @@ test "double dash ends options" {
     defer r.deinit(gpa);
     try std.testing.expectEqual(@as(usize, 1), r.targets.items.len);
     try std.testing.expectEqualStrings("-weird-name", r.targets.items[0]);
+}
+
+test "NaN timing values are usage errors, not panics" {
+    const gpa = std.testing.allocator;
+    var diag: Diagnostic = .{};
+    for ([_][]const u8{ "-i", "-p", "-t", "-Q" }) |opt| {
+        for ([_][]const u8{ "nan", "NaN", "-nan" }) |v| {
+            try std.testing.expectError(error.InvalidValue, parse(gpa, &.{ opt, v, "h" }, &diag));
+        }
+    }
+    try std.testing.expectError(error.InvalidValue, parse(gpa, &.{ "--seqmap-timeout=nan", "h" }, &diag));
+}
+
+test "size and ttl keep out-of-range values for fping's messages" {
+    const gpa = std.testing.allocator;
+    var diag: Diagnostic = .{};
+    var r = try parse(gpa, &.{ "-b", "70000", "-H", "300", "h" }, &diag);
+    defer r.deinit(gpa);
+    try std.testing.expectEqual(@as(u32, 70000), r.opts.size);
+    try std.testing.expect(r.opts.size_set);
+    try std.testing.expectEqual(@as(?u32, 300), r.opts.ttl);
+    // fping: -H 0 is usage(1).
+    try std.testing.expectError(error.InvalidValue, parse(gpa, &.{ "-H", "0", "h" }, &diag));
 }

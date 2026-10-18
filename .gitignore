@@ -1,5 +1,7 @@
 .zig-cache/
 zig-out/
+zig-pkg/
+.claude/worktrees/
 .zig-toolchain/
 releases/
 .claude/settings.local.json

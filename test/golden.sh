@@ -154,9 +154,14 @@ golden "targets from file"      full -t 200 -f "$TMP/targets"
 golden "ttl+tos"                full -H 64 -O 0 -t 200 127.0.0.1
 golden "random payload"         full -R -t 200 127.0.0.1
 golden "source address"         full -S 127.0.0.1 -t 200 127.0.0.1
+golden "backoff too large"      full -B 6 127.0.0.1
+golden "backoff too small"      full -B 0.5 127.0.0.1
+golden "ttl out of range"       full -H 300 127.0.0.1
+golden "only one of a, u"       full -a -u 127.0.0.1
 # Usage dumps list each port's own option set, so compare exit codes only.
 golden "invalid option value"   rc   -c x
 golden "generate without args"  rc   -g
+golden "ttl zero"               rc   -H 0 127.0.0.1
 
 golden_loop "loop per-recv -l"        2.5 -l -p 700 127.0.0.1
 golden_loop "loop interval report -Q" 2.5 -l -p 700 -Q 1 127.0.0.1

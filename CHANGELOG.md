@@ -18,6 +18,55 @@ functional and golden-diff suites pass unchanged.
   `std.fmt.allocPrint` → `Allocator.print` (deprecated in 0.17).
 - `build.zig`: `b.args` → `run.addPassthruArgs()`.
 - The vendored skill is now `zig-0.17` (zig-skills `v0.17.0-r1`).
+- Migration audit of scripts, CI and docs: `.gitignore` covers 0.17's
+  `zig-pkg/` and `.claude/worktrees/`; CI/`fuzz.sh` comments no longer claim
+  the 0.16 self-hosted fuzz-runner crash still needs dodging.
+### Audit fixes
+
+A post-migration audit found the defects below; most predate 0.17.
+
+- 32-bit Linux (x86, arm, riscv32) now compiles; unit tests pass on x86 and
+  arm. Two casts that assumed a 64-bit `usize`/`isize` got explicit
+  `@intCast`, and the `SO_TIMESTAMPNS_OLD` cmsg is parsed as the legacy
+  two-`long` timespec instead of `linux.timespec` (64-bit on riscv32, so the
+  kernel timestamp was never read there).
+- Fix (big-endian Linux, predates 0.17): the received `sa_family` and the
+  `IP_TTL`/`IPV6_HOPLIMIT`/`IPV6_TCLASS` control messages are host-order ints
+  but were read as little-endian. On s390x/ppc64, `--check-source` therefore
+  never saw a source address (every reply was accepted) and `--print-ttl` /
+  IPv6 `--print-tos` printed 0. Regression tests verified under qemu-s390x.
+- Fix: reverse DNS (`-n`/`-d`) no longer fails on legal DNS names that are not
+  RFC 1123 host names, e.g. RFC 2317 classless-delegation owners
+  (`5.0/26.2.0.192.in-addr.arpa`) or PTR targets with `_`. These names used
+  to go through `std.Io.net.HostName.expand`, which validates the name.
+- Fix: `-i`/`-p`/`-t`/`-Q`/`--seqmap-timeout` with `nan` caused a panic
+  (`@intFromFloat`). They are now usage errors (fping hits C undefined
+  behaviour here). The engine's backoff saturates instead of panicking on
+  NaN, negative or huge `backoff_factor` values or after many retries.
+- fping compatibility: the post-parse checks from fping v5.5 `main()` are
+  implemented with fping's messages (stderr, exit 1):
+  `ttl N out of range` (`-H` > 255; `-H 0` is a usage error),
+  `specify only one of a, u`, `-p must be >= 0.001` (non-root),
+  `data size N not valid, must not be larger than 65507` (previously
+  65508..65535 were accepted and larger values were a usage error),
+  `backoff factor X not valid, must be between 1.0 and 5.0` (previously
+  any factor was accepted, and `-B 1e30` panicked on the first retry),
+  `cannot change ICMP Timestamp size`, and, from fping develop together
+  with `--oiface`, `specify only --oiface or -I, --iface`.
+- Fix: resolving a name with more than 32 results (A+AAAA, long `/etc/hosts`
+  entries) hung forever: `HostName.lookup` blocks on a full result queue that
+  was only drained after it returned. The queue is now drained concurrently.
+- Fix: library users setting `Config` durations (`timeout_ns` etc.) above
+  `maxInt(i64)` hit an overflow panic in the run loop; `Pinger.init` now
+  clamps them to 2^62 ns. CLI behaviour is unchanged.
+- Tests: the rdns hosts-file test now asserts real lookups against a fixture
+  file; the `::1` vs `127.0.0.1` ordering test reports a skip instead of
+  passing silently on hosts without IPv6.
+- Fix: local times (`-D`, `-Q`) now honour the POSIX TZ footer of TZif v2+
+  files (e.g. `CET-1CEST,M3.5.0,M10.5.0/3`) for instants after the last
+  listed transition, as glibc does. Before, "slim" zoneinfo files (few or no
+  explicit transitions) lost DST after the last transition. A malformed
+  footer falls back to the last transition's offset.
 
 ### Pending upstream (deferred)
 

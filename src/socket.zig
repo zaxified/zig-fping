@@ -365,7 +365,10 @@ pub fn recvMsg(self: *const Socket, buf: []u8) ?RecvInfo {
 
 fn parseSrc(storage: *const [@sizeOf(linux.sockaddr.in6)]u8, namelen: linux.socklen_t) RecvInfo.SrcAddr {
     if (namelen < 2) return .none;
-    const af = std.mem.readInt(u16, storage[0..2], .little);
+    // sa_family is a host-order integer (unlike port/addr), so read it in
+    // native byte order: a .little read never matched on big-endian Linux,
+    // turning every --check-source source into .none (accepted unchecked).
+    const af = std.mem.bytesToValue(u16, storage[0..2]);
     if (af == linux.AF.INET and namelen >= @sizeOf(linux.sockaddr.in)) {
         return .{ .v4 = std.mem.bytesToValue(linux.sockaddr.in, storage[0..@sizeOf(linux.sockaddr.in)]) };
     } else if (af == linux.AF.INET6 and namelen >= @sizeOf(linux.sockaddr.in6)) {
@@ -419,6 +422,11 @@ pub fn recvBatch(self: *const Socket, b: *RecvBatch) []const RecvInfo {
     return b.infos[0..n];
 }
 
+/// SO_TIMESTAMPNS_OLD carries the legacy `struct timespec` of two native
+/// longs. Not linux.timespec: on riscv32 that is the 64-bit kernel_timespec,
+/// which would never fit the 8-byte payload.
+const OldTimespec = extern struct { sec: isize, nsec: isize };
+
 /// Walk the cmsg list (manual CMSG_NXTHDR; std has no cmsg iteration
 /// helpers as of 0.17).
 fn parseControl(control: []const u8, info: *RecvInfo) void {
@@ -431,21 +439,70 @@ fn parseControl(control: []const u8, info: *RecvInfo) void {
         const data = control[off + hdr_len .. off + cmsg.len];
 
         if (cmsg.level == linux.SOL.SOCKET and cmsg.type == linux.SO.TIMESTAMPNS_OLD) {
-            if (data.len >= @sizeOf(linux.timespec)) {
-                const ts: *const linux.timespec = @ptrCast(@alignCast(data.ptr));
+            if (data.len >= @sizeOf(OldTimespec)) {
+                const ts: *const OldTimespec = @ptrCast(@alignCast(data.ptr));
                 info.timestamp_real_ns = @as(i64, ts.sec) * std.time.ns_per_s + ts.nsec;
             }
         } else if (cmsg.level == linux.SOL.IP and cmsg.type == linux.IP.TTL) {
-            if (data.len >= 4) info.ttl = @truncate(std.mem.readInt(u32, data[0..4], .little));
+            // IP_TTL / IPV6_HOPLIMIT / IPV6_TCLASS carry a host-order int;
+            // a .little read truncated to 0 on big-endian targets.
+            if (data.len >= 4) info.ttl = @truncate(std.mem.bytesToValue(u32, data[0..4]));
         } else if (cmsg.level == linux.SOL.IP and cmsg.type == linux.IP.TOS) {
             if (data.len >= 1) info.tos = data[0];
         } else if (cmsg.level == linux.SOL.IPV6 and cmsg.type == linux.IPV6.HOPLIMIT) {
-            if (data.len >= 4) info.ttl = @truncate(std.mem.readInt(u32, data[0..4], .little));
+            if (data.len >= 4) info.ttl = @truncate(std.mem.bytesToValue(u32, data[0..4]));
         } else if (cmsg.level == linux.SOL.IPV6 and cmsg.type == linux.IPV6.TCLASS) {
-            if (data.len >= 4) info.tos = @truncate(std.mem.readInt(u32, data[0..4], .little));
+            if (data.len >= 4) info.tos = @truncate(std.mem.bytesToValue(u32, data[0..4]));
         }
 
         // CMSG_NXTHDR: advance by len rounded up to cmsghdr alignment.
         off += std.mem.alignForward(usize, cmsg.len, cmsg_align);
     }
+}
+
+fn appendCmsg(buf: []align(@alignOf(linux.cmsghdr)) u8, off: *usize, level: i32, typ: i32, data: []const u8) void {
+    const hdr_len = @sizeOf(linux.cmsghdr);
+    const hdr: linux.cmsghdr = .{ .len = hdr_len + data.len, .level = level, .type = typ };
+    @memcpy(buf[off.*..][0..hdr_len], std.mem.asBytes(&hdr));
+    @memcpy(buf[off.* + hdr_len ..][0..data.len], data);
+    off.* += std.mem.alignForward(usize, hdr_len + data.len, @alignOf(linux.cmsghdr));
+}
+
+test "parseControl reads host-order ints and timestamps" {
+    // The kernel writes these as native ints; building them with
+    // std.mem.toBytes keeps the test meaningful on big-endian targets.
+    var buf: [256]u8 align(@alignOf(linux.cmsghdr)) = @splat(0);
+    var off: usize = 0;
+    const ts: OldTimespec = .{ .sec = 12, .nsec = 345 };
+    appendCmsg(&buf, &off, linux.SOL.SOCKET, linux.SO.TIMESTAMPNS_OLD, std.mem.asBytes(&ts));
+    appendCmsg(&buf, &off, linux.SOL.IP, linux.IP.TTL, &std.mem.toBytes(@as(u32, 61)));
+    appendCmsg(&buf, &off, linux.SOL.IP, linux.IP.TOS, &.{0xb8});
+    var info: RecvInfo = .{ .packet = &.{} };
+    parseControl(buf[0..off], &info);
+    try std.testing.expectEqual(@as(?i64, 12 * std.time.ns_per_s + 345), info.timestamp_real_ns);
+    try std.testing.expectEqual(@as(?u8, 61), info.ttl);
+    try std.testing.expectEqual(@as(?u8, 0xb8), info.tos);
+
+    off = 0;
+    appendCmsg(&buf, &off, linux.SOL.IPV6, linux.IPV6.HOPLIMIT, &std.mem.toBytes(@as(u32, 63)));
+    appendCmsg(&buf, &off, linux.SOL.IPV6, linux.IPV6.TCLASS, &std.mem.toBytes(@as(u32, 0x20)));
+    info = .{ .packet = &.{} };
+    parseControl(buf[0..off], &info);
+    try std.testing.expectEqual(@as(?u8, 63), info.ttl);
+    try std.testing.expectEqual(@as(?u8, 0x20), info.tos);
+}
+
+test "parseSrc reads the host-order address family" {
+    var storage: [@sizeOf(linux.sockaddr.in6)]u8 align(8) = @splat(0);
+    const sa4: linux.sockaddr.in = .{ .port = 0, .addr = std.mem.bytesToValue(u32, &[4]u8{ 192, 0, 2, 7 }) };
+    @memcpy(storage[0..@sizeOf(linux.sockaddr.in)], std.mem.asBytes(&sa4));
+    const src4 = parseSrc(&storage, @sizeOf(linux.sockaddr.in));
+    try std.testing.expectEqual([4]u8{ 192, 0, 2, 7 }, std.mem.toBytes(src4.v4.addr));
+
+    const sa6: linux.sockaddr.in6 = .{ .port = 0, .flowinfo = 0, .addr = .{ 0x20, 0x01, 0x0d, 0xb8 } ++ @as([12]u8, @splat(0)), .scope_id = 0 };
+    @memcpy(storage[0..], std.mem.asBytes(&sa6));
+    const src6 = parseSrc(&storage, @sizeOf(linux.sockaddr.in6));
+    try std.testing.expectEqual(@as(u8, 0xb8), src6.v6.addr[3]);
+
+    try std.testing.expectEqual(RecvInfo.SrcAddr.none, parseSrc(&storage, 1));
 }

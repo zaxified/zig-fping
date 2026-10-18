@@ -328,8 +328,9 @@ pub const Pinger = struct {
     /// Set asynchronously (e.g. from a signal handler) to end run().
     stop_requested: std.atomic.Value(bool) = .init(false),
 
-    pub fn init(gpa: std.mem.Allocator, cfg: Config) !Pinger {
-        std.debug.assert(cfg.max_inflight < SeqMap.capacity);
+    pub fn init(gpa: std.mem.Allocator, config: Config) !Pinger {
+        std.debug.assert(config.max_inflight < SeqMap.capacity);
+        const cfg = clampConfig(config);
         const pkt_len = if (cfg.icmp_timestamp)
             icmp.timestamp_msg_len
         else
@@ -881,9 +882,60 @@ fn sourceMatches(src: Socket.RecvInfo.SrcAddr, target: Addr) bool {
     };
 }
 
+/// Upper bound for a backed-off timeout (~104 days): far beyond any real
+/// probe, yet `now + timeout` stays well inside i64.
+/// Upper bound for every nanosecond duration in Config. Durations are added
+/// to the monotonic clock as i64; 2^62 ns (~146 years) leaves headroom so
+/// the sum can never overflow, while being unreachable in practice.
+const max_config_ns: u64 = 1 << 62;
+
+/// Clamp out-of-range durations instead of panicking later in the run loop.
+fn clampConfig(config: Config) Config {
+    var cfg = config;
+    cfg.interval_ns = @min(cfg.interval_ns, max_config_ns);
+    cfg.perhost_interval_ns = @min(cfg.perhost_interval_ns, max_config_ns);
+    cfg.timeout_ns = @min(cfg.timeout_ns, max_config_ns);
+    cfg.jitter_ns = @min(cfg.jitter_ns, max_config_ns);
+    cfg.subnet_gap_ns = @min(cfg.subnet_gap_ns, max_config_ns);
+    return cfg;
+}
+
+test "config durations above i64 range are clamped" {
+    const huge = std.math.maxInt(u64);
+    const c = clampConfig(.{ .timeout_ns = huge, .interval_ns = huge, .perhost_interval_ns = huge, .jitter_ns = huge, .subnet_gap_ns = huge });
+    try std.testing.expectEqual(max_config_ns, c.timeout_ns);
+    try std.testing.expectEqual(max_config_ns, c.interval_ns);
+    try std.testing.expectEqual(max_config_ns, c.perhost_interval_ns);
+    try std.testing.expectEqual(max_config_ns, c.jitter_ns);
+    try std.testing.expectEqual(max_config_ns, c.subnet_gap_ns);
+    // The clamped value must survive the cast used by commitProbe.
+    _ = @as(i64, @intCast(c.timeout_ns)) + 1_000_000_000_000_000_000;
+    try std.testing.expectEqual(@as(u64, 500 * std.time.ns_per_ms), clampConfig(.{}).timeout_ns);
+}
+
+const max_backoff_timeout_ns: u64 = 1 << 53;
+
+/// Scale a timeout by the backoff factor, saturating instead of letting
+/// @intFromFloat panic (or invoke UB in ReleaseFast) on NaN, negative or
+/// huge factors and on many retries. A NaN or sub-1 factor leaves the
+/// timeout unchanged; the CLI already rejects factors outside 1.0..5.0
+/// like fping, but Config is public API.
 fn backoff(timeout_ns: u64, factor: f32) u64 {
+    if (!(factor >= 1.0)) return timeout_ns;
     const scaled = @as(f64, @floatFromInt(timeout_ns)) * factor;
+    if (!(scaled < @as(f64, @floatFromInt(max_backoff_timeout_ns)))) return @max(timeout_ns, max_backoff_timeout_ns);
     return @intFromFloat(scaled);
+}
+
+test "backoff scales and saturates instead of panicking" {
+    try std.testing.expectEqual(@as(u64, 750), backoff(500, 1.5));
+    try std.testing.expectEqual(@as(u64, 500), backoff(500, std.math.nan(f32)));
+    try std.testing.expectEqual(@as(u64, 500), backoff(500, -1.0));
+    try std.testing.expectEqual(max_backoff_timeout_ns, backoff(500, 1e30));
+    try std.testing.expectEqual(max_backoff_timeout_ns, backoff(500, std.math.inf(f32)));
+    var t: u64 = 500 * std.time.ns_per_ms;
+    for (0..65535) |_| t = backoff(t, 5.0);
+    try std.testing.expectEqual(max_backoff_timeout_ns, t);
 }
 
 pub fn monoNow() i64 {

@@ -131,9 +131,20 @@ test "policy precedence follows RFC 6724 table" {
 test "destination policy prefers ::1 over 127.0.0.1 like glibc" {
     var addrs = [_]Addr{ try .parse("127.0.0.1"), try .parse("::1") };
     // Skip on hosts with IPv6 disabled (reachability then demotes ::1).
-    if (!destinationReachable(addrs[1])) return;
+    if (!destinationReachable(addrs[1])) return error.SkipZigTest;
     sortByDestinationPolicy(&addrs);
     try std.testing.expectEqual(Addr.parse("::1"), addrs[0]);
+}
+
+test "sort orders by precedence when all destinations are equally reachable" {
+    // Pure sorting logic: precedence alone decides, whatever the host's IPv6.
+    // (Reachability may differ per host, so only compare within one family.)
+    var addrs = [_]Addr{ try .parse("fd00::1"), try .parse("2606:4700::1111") };
+    const reach_a = destinationReachable(addrs[0]);
+    const reach_b = destinationReachable(addrs[1]);
+    if (reach_a != reach_b) return error.SkipZigTest;
+    sortByDestinationPolicy(&addrs);
+    try std.testing.expectEqual(Addr.parse("2606:4700::1111"), addrs[0]);
 }
 
 test "sort is stable for equal keys" {

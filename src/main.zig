@@ -182,11 +182,11 @@ pub fn main(init: std.process.Init) !void {
         .perhost_interval_ns = opts.period_ns,
         .timeout_ns = timeout_ns,
         .backoff_factor = opts.backoff,
-        .payload_size = opts.size,
+        .payload_size = @intCast(opts.size), // <= max_ping_data (validate)
         .random_payload = opts.random_data,
         .icmp_timestamp = opts.icmp_timestamp,
         .check_source = opts.check_source,
-        .ttl = opts.ttl,
+        .ttl = if (opts.ttl) |t| @intCast(t) else null, // <= 255 (validate)
         .tos = opts.tos,
         .dont_fragment = opts.dont_frag,
         .fwmark = opts.fwmark,
@@ -320,19 +320,79 @@ pub fn main(init: std.process.Init) !void {
 }
 
 fn validate(opts: options_mod.Options, err: *Io.Writer) void {
-    // Messages and exit codes mirror fping's inline checks in fping.c.
-    if (opts.ipv4_only and opts.ipv6_only)
-        failUsage(err, "can't specify both -4 and -6", .{});
-    if (opts.loop and opts.count != null)
-        failUsage(err, "specify only one of c, l", .{});
-    if (opts.json and !(opts.count != null or opts.loop))
-        failUsage(err, "option -J, --json requires -c, -C, or -l", .{});
+    if (checkOptions(opts, std.os.linux.getuid() == 0)) |msg| {
+        err.print("{s}: {f}\n", .{ prog, msg }) catch {};
+        err.flush() catch {};
+        std.process.exit(exit_usage);
+    }
+}
+
+/// fping's MAX_PING_DATA: 65535 - 20 (IPv4 header) - 8 (ICMP header).
+const max_ping_data = 65535 - 20 - 8;
+/// fping's MIN/MAX_BACKOFF_FACTOR.
+const min_backoff = 1.0;
+const max_backoff = 5.0;
+/// fping's MIN_PERHOST_INTERVAL_MS without --enable-safe-limits (the
+/// default build), in ns. MIN_INTERVAL_MS is 0 there, and negative -i
+/// values are already usage errors, so the -i check can never fire.
+const min_perhost_interval_ns = 1000;
+
+/// One failed post-parse option check; renders the text after "<prog>: ".
+const OptionError = union(enum) {
+    both_families,
+    ttl_range: u32,
+    alive_and_unreach,
+    oiface_and_iface,
+    count_and_loop,
+    json_mode,
+    perhost_interval,
+    data_size: u32,
+    backoff: f32,
+    timestamp_size,
+    timestamp_ipv6,
+
+    pub fn format(self: OptionError, w: *Io.Writer) Io.Writer.Error!void {
+        switch (self) {
+            .both_families => try w.writeAll("can't specify both -4 and -6"),
+            .ttl_range => |t| try w.print("ttl {d} out of range", .{t}),
+            .alive_and_unreach => try w.writeAll("specify only one of a, u"),
+            .oiface_and_iface => try w.writeAll("specify only --oiface or -I, --iface"),
+            .count_and_loop => try w.writeAll("specify only one of c, l"),
+            .json_mode => try w.writeAll("option -J, --json requires -c, -C, or -l"),
+            // fping prints (float)MIN_PERHOST_INTERVAL_MS with %g.
+            .perhost_interval => try w.writeAll("-p must be >= 0.001"),
+            .data_size => |n| try w.print("data size {d} not valid, must not be larger than {d}", .{ n, max_ping_data }),
+            .backoff => |b| try w.print("backoff factor {d:.1} not valid, must be between 1.0 and 5.0", .{@as(f64, b)}),
+            .timestamp_size => try w.writeAll("cannot change ICMP Timestamp size"),
+            .timestamp_ipv6 => try w.writeAll("ICMP Timestamp is IPv4 only"),
+        }
+    }
+};
+
+/// fping's inline post-parse checks (fping.c main(), v5.5), in fping's
+/// order. Messages go to stderr as "<prog>: <message>" with exit 1.
+fn checkOptions(opts: options_mod.Options, is_root: bool) ?OptionError {
+    // fping rejects -4 together with -6 while parsing, i.e. first.
+    if (opts.ipv4_only and opts.ipv6_only) return .both_families;
+    if (opts.ttl) |t| if (t > 255) return .{ .ttl_range = t };
+    if (opts.show_alive and opts.show_unreach) return .alive_and_unreach;
+    // Only on fping develop (with --oiface itself, see CHANGELOG); not in
+    // v5.5.
+    if (opts.oiface != null and opts.iface != null) return .oiface_and_iface;
+    if (opts.loop and opts.count != null) return .count_and_loop;
+    if (opts.json and !(opts.count != null or opts.loop)) return .json_mode;
+    if (opts.period_ns < min_perhost_interval_ns and !is_root) return .perhost_interval;
+    if (opts.size > max_ping_data) return .{ .data_size = opts.size };
+    // NaN fails both comparisons and passes, exactly like fping's check;
+    // the engine's backoff() then leaves the timeout unchanged.
+    if (opts.backoff > max_backoff or opts.backoff < min_backoff) return .{ .backoff = opts.backoff };
+    if (opts.icmp_timestamp and opts.size_set) return .timestamp_size;
     // fping checks this while parsing, so upstream it only fires when -4/-6
     // precede --icmp-timestamp; we check it order-independently.
-    if (opts.icmp_timestamp and opts.ipv6_only)
-        failUsage(err, "ICMP Timestamp is IPv4 only", .{});
+    if (opts.icmp_timestamp and opts.ipv6_only) return .timestamp_ipv6;
     // NOTE: fping never validates -N (netdata) prerequisites; -N without
     // -l/-Q simply behaves like a normal run, so neither do we.
+    return null;
 }
 
 /// fping's usage(1): dump the usage text to stderr and exit 1.
@@ -396,6 +456,44 @@ fn readTargetFile(
     }
 }
 
+/// Drains `queue` until the producer closes it. Addresses beyond
+/// `out_buf.len` are discarded, but still consumed so the producer never
+/// blocks on a full queue. Returns the number of addresses stored.
+fn collectAddresses(io: Io, queue: *Io.Queue(Io.net.HostName.LookupResult), out_buf: []fping.Addr) usize {
+    var n: usize = 0;
+    while (queue.getOne(io)) |result| {
+        switch (result) {
+            .address => |ip| if (n < out_buf.len) {
+                out_buf[n] = fping.Addr.fromIpAddress(ip);
+                n += 1;
+            },
+            .canonical_name => {},
+        }
+    } else |_| {}
+    return n;
+}
+
+fn produceTestResults(io: Io, queue: *Io.Queue(Io.net.HostName.LookupResult), count: u8) Io.Cancelable!void {
+    defer queue.close(io);
+    var i: u8 = 0;
+    while (i < count) : (i += 1) {
+        queue.putOne(io, .{ .address = .{ .ip4 = .{ .bytes = .{ 10, 0, 0, i }, .port = 0 } } }) catch return;
+    }
+}
+
+test "collectAddresses drains more results than the queue holds" {
+    const io = std.testing.io;
+    var buf: [4]Io.net.HostName.LookupResult = undefined;
+    var queue: Io.Queue(Io.net.HostName.LookupResult) = .init(&buf);
+    var fut = try io.concurrent(produceTestResults, .{ io, &queue, @as(u8, 100) });
+    var out: [64]fping.Addr = undefined;
+    const n = collectAddresses(io, &queue, &out);
+    try fut.await(io);
+    // 100 produced, out_buf holds 64: the excess is dropped, not blocked on.
+    try std.testing.expectEqual(@as(usize, 64), n);
+    try std.testing.expectEqual(@as(u8, 63), std.mem.asBytes(&out[63].v4.addr)[3]);
+}
+
 fn resolveTarget(
     io: Io,
     name: []const u8,
@@ -420,25 +518,61 @@ fn resolveTarget(
     const host = HostName.init(name) catch return error.UnknownHostName;
     var results_buf: [32]HostName.LookupResult = undefined;
     var queue: Io.Queue(HostName.LookupResult) = .init(&results_buf);
-    try host.lookup(io, &queue, .{ .port = 0, .family = family });
-
-    var n: usize = 0;
-    while (n < out_buf.len) {
-        const result = queue.getOne(io) catch break;
-        switch (result) {
-            .address => |ip| {
-                out_buf[n] = fping.Addr.fromIpAddress(ip);
-                n += 1;
-            },
-            .canonical_name => {},
-        }
-    }
+    // std documents no upper bound on the number of results (every
+    // /etc/hosts line and DNS record is one), and lookup() blocks once the
+    // queue is full, so the queue must be drained while lookup runs. A
+    // concurrent task is required; Io.async may run lookup inline.
+    const lookup_opts: HostName.LookupOptions = .{ .port = 0, .family = family };
+    const n = if (io.concurrent(HostName.lookup, .{ host, io, &queue, lookup_opts })) |future| blk: {
+        var lookup_future = future;
+        defer _ = lookup_future.cancel(io) catch {};
+        const count = collectAddresses(io, &queue, out_buf);
+        try lookup_future.await(io);
+        break :blk count;
+    } else |_| blk: {
+        // No unit of concurrency (e.g. a single-threaded Io): look up inline
+        // as before; only names with more results than the queue holds block.
+        try HostName.lookup(host, io, &queue, lookup_opts);
+        break :blk collectAddresses(io, &queue, out_buf);
+    };
     if (n == 0) return error.UnknownHostName;
     // fping takes getaddrinfo results in order, which glibc sorts per
     // RFC 6724 (e.g. ::1 before 127.0.0.1 for "localhost"); std's lookup
     // returns /etc/hosts and DNS order, so sort here to match.
     fping.netutil.sortByDestinationPolicy(out_buf[0..n]);
     return if (all) out_buf[0..n] else out_buf[0..1];
+}
+
+fn expectOptionError(args: []const []const u8, is_root: bool, expected: ?[]const u8) !void {
+    var diag: options_mod.Diagnostic = .{};
+    var r = try options_mod.parse(std.testing.allocator, args, &diag);
+    defer r.deinit(std.testing.allocator);
+    const got = checkOptions(r.opts, is_root);
+    if (expected) |text| {
+        var buf: [128]u8 = undefined;
+        var w: Io.Writer = .fixed(&buf);
+        try w.print("{f}", .{got orelse return error.TestExpectedError});
+        try std.testing.expectEqualStrings(text, w.buffered());
+    } else {
+        try std.testing.expectEqual(@as(?OptionError, null), got);
+    }
+}
+
+test "post-parse option checks mirror fping v5.5 messages" {
+    try expectOptionError(&.{ "-c1", "h" }, false, null);
+    try expectOptionError(&.{ "-H", "255", "-b", "65507", "-B", "5", "h" }, false, null);
+    try expectOptionError(&.{ "-H", "300", "h" }, false, "ttl 300 out of range");
+    try expectOptionError(&.{ "-a", "-u", "h" }, false, "specify only one of a, u");
+    try expectOptionError(&.{ "-I", "lo", "--oiface=lo", "h" }, false, "specify only --oiface or -I, --iface");
+    try expectOptionError(&.{ "-p", "0", "h" }, false, "-p must be >= 0.001");
+    try expectOptionError(&.{ "-p", "0", "h" }, true, null);
+    try expectOptionError(&.{ "-p", "0.001", "h" }, false, null);
+    try expectOptionError(&.{ "-b", "65508", "h" }, false, "data size 65508 not valid, must not be larger than 65507");
+    try expectOptionError(&.{ "-B", "6", "h" }, false, "backoff factor 6.0 not valid, must be between 1.0 and 5.0");
+    try expectOptionError(&.{ "-B", "0.5", "h" }, false, "backoff factor 0.5 not valid, must be between 1.0 and 5.0");
+    try expectOptionError(&.{ "-B", "nan", "h" }, false, null);
+    try expectOptionError(&.{ "--icmp-timestamp", "-b", "12", "h" }, false, "cannot change ICMP Timestamp size");
+    try expectOptionError(&.{ "--icmp-timestamp", "h" }, false, null);
 }
 
 test {
