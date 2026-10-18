@@ -114,7 +114,7 @@ function renderTarget(t) {
   $(".name", node).textContent = t.name;
   $(".host", node).textContent = t.host;
   $(".uptime", node).textContent = s.uptime === null ? "–" : `${s.uptime.toFixed(s.uptime === 100 ? 0 : 2)} %`;
-  $(".latency", node).textContent = ms(s.last);
+  $(".latency", node).textContent = t.paused ? "–" : ms(s.last);
   renderBeats($(".beats", node), t);
 
   const head = $(".head", node);

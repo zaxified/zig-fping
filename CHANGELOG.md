@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+### Pending upstream (deferred)
+
+To be implemented once the change reaches an upstream release tag
+(Compatible-with release is `v5.5`):
+
+- `--print-reply-dst` and the JSON `src` field (upstream `292d56f`,
+  `e269abd`, `acb6579`, IPv6 in `8163e28`; unreleased as of v5.5). Prints
+  the local address a reply arrived on, for both IPv4 and IPv6. `socket.zig`
+  builds `IP_PKTINFO`/`IPV6_PKTINFO` only for *sending* (`--oiface`); the
+  receive path enables `RECVTTL`/`RECVTOS` but not
+  `IP_PKTINFO`/`IPV6_RECVPKTINFO`, so this needs the receive socket options,
+  cmsg parsing for the reply's destination address, and that address carried
+  through the reply struct into the renderers in `src/cli/output.zig`.
+
+## 0.2.0 — first release for Zig 0.17 (2026-10-18)
+
+zig-fping now requires **Zig 0.17.0**; stay on Zig 0.16 with `v0.1.3`.
+Besides the migration, this release collects a post-migration audit
+(32-bit and big-endian Linux fixes, fping v5.5 option checks), golden diffs
+against fping 5.5, a deterministic fuzz driver, library API hardening
+(assertions became errors; breaking for library users), new opt-in library
+options (`Config.raw_ident`, `Config.icmp_errors_dgram`) and an example
+application, `example-apps/fping-watch`.
+
 ### Example application: fping-watch
 
 `example-apps/fping-watch` (proof of concept): a ping monitor daemon on top
@@ -79,20 +103,6 @@ A post-migration audit found the defects below; most predate 0.17.
   listed transition, as glibc does. Before, "slim" zoneinfo files (few or no
   explicit transitions) lost DST after the last transition. A malformed
   footer falls back to the last transition's offset.
-
-### Pending upstream (deferred)
-
-To be implemented once the change reaches an upstream release tag
-(Compatible-with release is `v5.5`):
-
-- `--print-reply-dst` and the JSON `src` field (upstream `292d56f`,
-  `e269abd`, `acb6579`, IPv6 in `8163e28`; unreleased as of v5.5). Prints
-  the local address a reply arrived on, for both IPv4 and IPv6. `socket.zig`
-  builds `IP_PKTINFO`/`IPV6_PKTINFO` only for *sending* (`--oiface`); the
-  receive path enables `RECVTTL`/`RECVTOS` but not
-  `IP_PKTINFO`/`IPV6_RECVPKTINFO`, so this needs the receive socket options,
-  cmsg parsing for the reply's destination address, and that address carried
-  through the reply struct into the renderers in `src/cli/output.zig`.
 
 ### Golden-diff against fping 5.5
 
@@ -211,7 +221,7 @@ crash, hangs invisible).
   pointer-loop guard, accepted zero count, /31 treated as /30) are found in
   about two seconds each.
 
-### Library API hardening (breaking, before v0.2.0)
+### Library API hardening (breaking)
 
 Size and count preconditions on the public API were `std.debug.assert`s,
 which compile out in ReleaseFast (undefined behaviour for a library caller).

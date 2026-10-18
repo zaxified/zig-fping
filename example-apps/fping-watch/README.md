@@ -3,6 +3,10 @@
 A small ping monitor built on the `zig_fping` library: a daemon that pings a
 handful of targets once a minute and serves a web page with the last 24 hours.
 
+![fping-watch: eleven targets with status, recent cycles and uptime; one row expanded to its 24-hour latency chart](doc/screenshot.png)
+
+<sub>Sample data: one target paused, one acknowledged, one row expanded.</sub>
+
 - one row per target with its status, a strip of recent cycles (green: all
   replies, orange: some lost, red: all lost), 24-hour uptime and current latency;
 - click a row for the 24-hour latency chart with packet loss underneath;

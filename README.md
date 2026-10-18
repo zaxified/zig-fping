@@ -120,7 +120,8 @@ cycle of 10k checks per 5 minutes uses well under 1% of that.
 zig fetch --save git+https://github.com/zaxified/zig-fping
 ```
 
-`main` follows the current Zig release. **v0.1.3 is the last release for
+`main` follows the current Zig release; **v0.2.0** is the latest release
+(Zig 0.17, `#v0.2.0` pins it). **v0.1.3 is the last release for
 Zig 0.16** — pin it if your project stays on 0.16
 (`zig fetch --save git+https://github.com/zaxified/zig-fping#v0.1.3`).
 
@@ -205,6 +206,8 @@ monitor built on the library: a daemon that pings a handful of targets every
 minute and serves a web page with 24 hours of status, latency and loss, with
 pause and Nagios-style acknowledgements, and a `--read-only` mode for public
 demos. It is its own package and shows how a consumer depends on `zig_fping`.
+
+<a href="example-apps/fping-watch"><img src="example-apps/fping-watch/doc/screenshot.png" width="480" alt="fping-watch web page: targets with status, recent cycles, uptime and a latency chart"></a>
 
 ## CLI
 

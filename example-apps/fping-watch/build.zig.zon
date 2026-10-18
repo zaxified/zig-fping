@@ -3,7 +3,7 @@
     .version = "0.0.0",
     .minimum_zig_version = "0.17.0",
     .fingerprint = 0x35ee980ba83c73f5,
-    .paths = .{ "build.zig", "build.zig.zon", "src", "targets.json", "smoke.sh", "README.md" },
+    .paths = .{ "build.zig", "build.zig.zon", "src", "targets.json", "smoke.sh", "README.md", "doc" },
     .dependencies = .{
         // The library from this repository's checkout. A copy of this
         // directory taken on its own would pin a release instead:

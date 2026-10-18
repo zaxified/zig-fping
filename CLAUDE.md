@@ -30,7 +30,9 @@ one network branch causes false DOWN states.
   (fuzzing unblocked on 0.16.0 via `--release=safe`, CI hardening, man page
   install, `src/main.zig`→`src/cli/` split), **v0.1.3** (2026-10-18, the
   last release for Zig 0.16 — no fixes planned for that line; `main` moves
-  to Zig 0.17). See CHANGELOG.md.
+  to Zig 0.17), **v0.2.0** (2026-10-18, first release for Zig 0.17: audit
+  fixes, golden vs fping 5.5, fuzz driver, API hardening, `fping-watch`
+  example). See CHANGELOG.md.
 
 ## Upstream tracking (fping → zig-fping)
 
