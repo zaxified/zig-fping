@@ -31,12 +31,15 @@ it was ported from:
   a Perl end-to-end suite); here the parsers, checksum, seqmap, target
   generator, option parser and even the scheduler's pacing math have unit
   tests, and every test runs under a leak-detecting allocator.
-- **Fuzzing built into the toolchain.** `scripts/fuzz.sh` (a time-boxed
-  `zig build test --fuzz --release=safe`) fuzzes the ICMP and DNS-response parsers — the
-  code paths that consume untrusted bytes from the network — plus the CLI
-  option parser and `-g` target generation. In C this needs external
-  harnesses (libFuzzer/AFL). The same fuzz bodies also run as smoke tests
-  in every `zig build test`.
+- **Fuzzing built into the toolchain.** `scripts/fuzz.sh` drives the ICMP and
+  DNS-response parsers — the code paths that consume untrusted bytes from the
+  network — plus the CLI option parser and `-g` target generation from
+  deterministic seeds: one ReleaseSafe build, one process per core, a hang
+  watchdog, millions of inputs per second on the parsers, any failing seed
+  replays by number. In C this needs external harnesses (libFuzzer/AFL). Every
+  harness has a seed corpus of real packets and argv vectors and reach
+  counters, and a test in every `zig build test` fails if a harness stops
+  reaching one of its branches.
 - **Comptime.** The wire checksum is verified *at compile time* (see
   `icmp.zig` "comptime checksum" test) — a regression cannot even build.
   Tagged unions with exhaustive switches replace C's int-and-convention
@@ -241,7 +244,7 @@ downloaded automatically into `.zig-toolchain/` when missing:
 scripts/test.sh      # fmt check + build + unit + functional + golden-diff
 scripts/release.sh   # the above + static binaries for all targets
                      #   into releases/v<version>/ (tar.gz + SHA256SUMS)
-scripts/fuzz.sh      # time-boxed fuzzing of the parser fuzz targets
+scripts/fuzz.sh      # deterministic-seed fuzzing of the parser/option/target harnesses
 ```
 
 Or directly with your own Zig 0.17.0:
@@ -250,7 +253,8 @@ Or directly with your own Zig 0.17.0:
 zig build -Doptimize=ReleaseSafe       # library + zfping (shipped build mode)
 zig build test -Doptimize=ReleaseSafe  # unit tests
 sh test/functional.sh                  # functional suite (isolated user+net namespace)
-sh test/golden.sh                      # byte-diff against an installed reference fping
+sh test/golden.sh ./zig-out/bin/zfping "$(sh scripts/fping-ref.sh)"  # byte-diff against fping 5.5 (built locally)
+sh test/golden.sh                      # byte-diff against an installed reference fping (5.1 skips v5.5 scenarios)
 ```
 
 The GitHub release workflow runs the same `scripts/release.sh`, so local

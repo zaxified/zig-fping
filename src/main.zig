@@ -148,10 +148,10 @@ pub fn main(init: std.process.Init) !void {
     if (opts.generate) {
         if (opts.file != null) usageError(err);
         switch (parsed.targets.items.len) {
-            1 => generate.addCidr(arena, &raw_targets, parsed.targets.items[0]) catch
-                usageError(err),
-            2 => generate.addRange(arena, &raw_targets, parsed.targets.items[0], parsed.targets.items[1]) catch
-                usageError(err),
+            1 => generate.addCidr(arena, &raw_targets, parsed.targets.items[0]) catch |e|
+                generateFail(err, e),
+            2 => generate.addRange(arena, &raw_targets, parsed.targets.items[0], parsed.targets.items[1]) catch |e|
+                generateFail(err, e),
             else => usageError(err),
         }
     } else if (opts.file) |path| {
@@ -400,6 +400,15 @@ fn usageError(err: *Io.Writer) noreturn {
     err.writeAll(usage_text) catch {};
     err.flush() catch {};
     std.process.exit(exit_usage);
+}
+
+/// -g generator failure: fping reports an exceeded MAX_GENERATE with its own
+/// message (add_addr_range_ipv4/ipv6) and everything else through usage(1).
+fn generateFail(err: *Io.Writer, e: generate.Error) noreturn {
+    switch (e) {
+        error.TooManyTargets, error.RangeTooWide => failUsage(err, "-g parameter generates too many addresses", .{}),
+        else => usageError(err),
+    }
 }
 
 /// fping's inline "<prog>: <message>" + exit(1) error path.

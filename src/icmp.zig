@@ -45,12 +45,13 @@ pub const Family = enum { v4, v6 };
 /// RFC 1071 internet checksum over `data`, returned in host byte order.
 /// Store the result big-endian into the packet.
 pub fn checksum(data: []const u8) u16 {
-    var sum: u32 = 0;
+    // u64: a u32 accumulator overflows past ~131 kB of data.
+    var sum: u64 = 0;
     var i: usize = 0;
     while (i + 1 < data.len) : (i += 2) {
-        sum += (@as(u32, data[i]) << 8) | data[i + 1];
+        sum += (@as(u64, data[i]) << 8) | data[i + 1];
     }
-    if (i < data.len) sum += @as(u32, data[i]) << 8;
+    if (i < data.len) sum += @as(u64, data[i]) << 8;
     while (sum >> 16 != 0) sum = (sum & 0xffff) + (sum >> 16);
     return @intCast(~sum & 0xffff);
 }
@@ -106,7 +107,7 @@ pub const Reply = union(enum) {
     /// `ts` is set for ICMP timestamp replies.
     echo_reply: struct { ident: u16, seq: u16, ts: ?TsData = null },
     /// ICMP error quoting an echo/timestamp request of ours.
-    icmp_error: struct { kind: ErrorKind, code: u8, orig_ident: u16, orig_seq: u16 },
+    icmp_error: struct { kind: ErrorKind, icmp_type: u8, code: u8, orig_ident: u16, orig_seq: u16 },
     /// Anything else (not ours, malformed, uninteresting type).
     ignored,
 };
@@ -156,6 +157,7 @@ pub fn parseV4(packet: []const u8, strip_ip_header: bool) Reply {
                     v4.param_problem => .param_problem,
                     else => .other,
                 },
+                .icmp_type = buf[0],
                 .code = buf[1],
                 .orig_ident = std.mem.readInt(u16, orig[4..6], .big),
                 .orig_seq = std.mem.readInt(u16, orig[6..8], .big),
@@ -191,6 +193,7 @@ pub fn parseV6(packet: []const u8) Reply {
                     v6.param_problem => .param_problem,
                     else => .other,
                 },
+                .icmp_type = buf[0],
                 .code = buf[1],
                 .orig_ident = std.mem.readInt(u16, orig[4..6], .big),
                 .orig_seq = std.mem.readInt(u16, orig[6..8], .big),
@@ -210,6 +213,17 @@ test "checksum odd length" {
     const data = [_]u8{ 0xff, 0xff, 0x01 };
     // sum = 0xffff + 0x0100 = 0x100ff -> fold -> 0x0100; ~0x0100 = 0xfeff
     try std.testing.expectEqual(@as(u16, 0xfeff), checksum(&data));
+}
+
+test "checksum of a buffer past the old u32 accumulator limit" {
+    // 70000 words of 0xffff sum to 4.59e9, beyond u32 (panic in safe modes,
+    // wrong result in ReleaseFast). Ones'-complement folding gives 0xffff,
+    // so the checksum is 0.
+    const data: [140_000]u8 = @splat(0xff);
+    try std.testing.expectEqual(@as(u16, 0), checksum(&data));
+    // An odd trailing byte is its own high-order word.
+    const odd: [140_001]u8 = @splat(0xff);
+    try std.testing.expectEqual(@as(u16, 0x00ff), checksum(&odd));
 }
 
 test "echo request round-trip v4 dgram" {
@@ -294,19 +308,166 @@ test "checksum property: inserting the checksum makes packets verify" {
     }
 }
 
-test "fuzz: parsers never crash on arbitrary packets" {
-    // Fuzzing is built into the Zig toolchain (`zig build test --fuzz`);
-    // under a plain `zig build test` this runs as a smoke test. The
-    // parsers handle untrusted bytes straight from the network, and safe
-    // build modes turn any out-of-bounds access into a caught panic.
-    try std.testing.fuzz({}, fuzzParsers, .{});
+// ---- fuzzing ------------------------------------------------------------------
+//
+// The parsers read untrusted bytes straight from the network; safe build modes
+// turn any out-of-bounds access into a caught panic. The harness is generic
+// over its source of choices: `scripts/fuzz.sh` drives it from seeds
+// (fuzz_driver.Rng), `zig build test --fuzz` (optional) from a Smith script.
+// Uniform random octets almost never form a self-consistent packet, so half of
+// every run mutates a real packet from `parser_seeds` instead.
+
+const fuzz_driver = @import("fuzz_driver");
+
+/// Real boundary inputs: v4/v6 echo replies and errors, the exact quoted-header
+/// edge (27 octets of quote rejected, 28 accepted), timestamp messages, the
+/// raw-socket form with its IP header, and foreign or truncated datagrams.
+const parser_seeds = [_][]const u8{
+    fuzz_driver.seedHex("00006DD895550001DBDE6D6A00000000F2B4020000000000101112131415161718191A1B1C1D1E1F202122232425262728292A2B2C2D2E2F3031323334353637"), // v4 echo reply
+    fuzz_driver.seedHex("080065D895550001DBDE6D6A00000000F2B4020000000000101112131415161718191A1B1C1D1E1F202122232425262728292A2B2C2D2E2F3031323334353637"), // v4 echo request: ignored
+    fuzz_driver.seedHex("45000054A9E100004001D2C57F0000017F000001" ++ "00006DD895550001DBDE6D6A00000000F2B4020000000000101112131415161718191A1B1C1D1E1F202122232425262728292A2B2C2D2E2F3031323334353637"), // the reply behind its IPv4 header: the SOCK_RAW path
+    fuzz_driver.seedHex("03033D3A0000000045000021875740004011B5727F0000017F000001E1829C3F000DFE2068656C6C6F"), // v4 port-unreachable quoting UDP: not ours
+    fuzz_driver.seedHex("03019D7D00000000" ++ "45" ++ fuzz_driver.rep("00", 19) ++ "080000001234004D"), // v4 host-unreachable quoting OUR echo request
+    fuzz_driver.seedHex("0B00A26800000000" ++ "45" ++ fuzz_driver.rep("00", 19) ++ "0D00000000550042"), // v4 time-exceeded quoting our TIMESTAMP request
+    fuzz_driver.seedHex("45000054A9E100004001D2C57F0000017F000001" ++ "03019D7D00000000" ++ "45" ++ fuzz_driver.rep("00", 19) ++ "080000001234004D"), // the host-unreachable behind its IPv4 header: the SOCK_RAW error path
+    fuzz_driver.seedHex("0D00AF6E13570001000030390000000000000000"), // v4 timestamp request: ignored
+    fuzz_driver.seedHex("0E0046471357000100003039028FB184028FB184"), // v4 timestamp reply: carries TsData
+    fuzz_driver.seedHex("0B" ++ fuzz_driver.rep("00", 7) ++ "45" ++ fuzz_driver.rep("00", 19) ++ "08" ++ fuzz_driver.rep("00", 6)), // 27 octets of quote: one short, rejected
+    fuzz_driver.seedHex("0B00A7FF00000000" ++ "45" ++ fuzz_driver.rep("00", 19) ++ "08" ++ fuzz_driver.rep("00", 7)), // 28 octets of quote: the exact accepting edge
+    fuzz_driver.seedHex("81004D52955A0001DBDE6D6A0000000087B90C0000000000101112131415161718191A1B1C1D1E1F202122232425262728292A2B2C2D2E2F3031323334353637"), // v6 echo reply
+    fuzz_driver.seedHex("80004E52955A0001DBDE6D6A0000000087B90C0000000000101112131415161718191A1B1C1D1E1F202122232425262728292A2B2C2D2E2F3031323334353637"), // v6 echo request: ignored
+    fuzz_driver.seedHex("0104FF6E000000006002D283000E11400000000000000000000000000000000100000000000000000000000000000001DAC59C3F000E002168656C6C6F36"), // v6 port-unreachable quoting UDP: next header 17
+    fuzz_driver.seedHex("01" ++ fuzz_driver.rep("00", 13) ++ "3A" ++ fuzz_driver.rep("00", 33) ++ "8000" ++ "0000" ++ "BEEF" ++ "0009"), // v6 dest-unreachable quoting OUR echo request
+    fuzz_driver.seedHex("010203"), // shorter than any header
+    fuzz_driver.seedHex("6300000000000000"), // header-sized packet of a type nobody handles
+    fuzz_driver.seedHex(""), // the empty datagram
+};
+
+fn parsersHarness(comptime S: type, src: *S, gpa: std.mem.Allocator) anyerror!void {
+    _ = gpa;
+    // ONE `slice` draw for the raw packet (a `bytes` followed by a ranged
+    // length draw reads length 0 under Smith's .in mode).
+    var buf: [256]u8 = undefined;
+    const len: usize = src.slice(&buf);
+    if (len != 0) fuzz_driver.hit("raw_nonempty");
+    try checkPacket(buf[0..len]);
+
+    // A real packet with up to two octets changed, sometimes truncated.
+    const body = fuzz_driver.frameOf(parser_seeds[src.index(parser_seeds.len)]);
+    var pkt: [256]u8 = undefined;
+    @memcpy(pkt[0..body.len], body);
+    var plen = body.len;
+    for (0..src.index(3)) |_| {
+        if (plen == 0) break;
+        pkt[src.index(plen)] = src.value(u8);
+        fuzz_driver.hit("mutated");
+    }
+    if (plen > 0 and src.index(4) == 0) {
+        plen = src.index(plen + 1);
+        fuzz_driver.hit("truncated");
+    }
+    try checkPacket(pkt[0..plen]);
 }
 
-fn fuzzParsers(_: void, smith: *std.testing.Smith) !void {
-    var buf: [256]u8 = undefined;
-    smith.bytes(&buf);
-    const len: usize = smith.valueRangeAtMost(u16, 0, buf.len);
-    _ = parseV4(buf[0..len], false);
-    _ = parseV4(buf[0..len], true);
-    _ = parseV6(buf[0..len]);
+fn checkPacket(buf: []const u8) !void {
+    const len = buf.len;
+    const raw = parseV4(buf, false);
+    const stripped = parseV4(buf, true);
+    const raw6 = parseV6(buf);
+    switch (raw) {
+        .echo_reply => |r| {
+            fuzz_driver.hit("v4_reply");
+            try std.testing.expect(len >= echo_header_len);
+            if (r.ts != null) {
+                fuzz_driver.hit("v4_timestamp_reply");
+                try std.testing.expect(len >= timestamp_msg_len and buf[0] == v4.timestamp_reply);
+            }
+        },
+        .icmp_error => {
+            fuzz_driver.hit("v4_error");
+            // never for a packet too short to hold the quote it reports
+            try std.testing.expect(len >= echo_header_len + 20 + echo_header_len);
+        },
+        .ignored => {},
+    }
+    switch (raw6) {
+        .echo_reply => {
+            fuzz_driver.hit("v6_reply");
+            try std.testing.expect(len >= echo_header_len);
+        },
+        .icmp_error => {
+            fuzz_driver.hit("v6_error");
+            try std.testing.expect(len >= echo_header_len + 40 + echo_header_len);
+        },
+        .ignored => {},
+    }
+    switch (stripped) {
+        .echo_reply => fuzz_driver.hit("strip_reply"),
+        .icmp_error => fuzz_driver.hit("strip_error"),
+        .ignored => {},
+    }
+
+    // The strip path is the plain path over what follows the IP header, and
+    // nothing else; a bad or oversized header length is `.ignored`.
+    if (len >= 20) {
+        const ihl = @as(usize, buf[0] & 0x0f) * 4;
+        if (ihl >= 20 and ihl <= len) {
+            fuzz_driver.hit("strip_checked");
+            try std.testing.expectEqual(parseV4(buf[ihl..], false), stripped);
+        } else {
+            try std.testing.expectEqual(Reply.ignored, stripped);
+        }
+    } else {
+        try std.testing.expectEqual(Reply.ignored, stripped);
+    }
+}
+
+test "fuzz: parsers never crash on arbitrary packets" {
+    // Optional `zig build test --fuzz`; a plain run replays the corpus once.
+    try std.testing.fuzz({}, fuzz_driver.smithEntry(parsersHarness, 512), .{ .corpus = &parser_seeds });
+}
+
+test "fuzz driver: icmp" {
+    try fuzz_driver.run(parsersHarness, .{ .name = "icmp" });
+}
+
+test "fuzz harness: icmp reaches every branch in 500 seeds" {
+    try fuzz_driver.expectReach(parsersHarness, "icmp", 500, &.{
+        "raw_nonempty",
+        "mutated",
+        "truncated",
+        "v4_reply",
+        "v4_timestamp_reply",
+        "v4_error",
+        "v6_reply",
+        "v6_error",
+        "strip_reply",
+        "strip_error",
+        "strip_checked",
+    });
+}
+
+test "fuzz corpus: icmp seeds classify as documented" {
+    var replies4: usize = 0;
+    var errors4: usize = 0;
+    var replies6: usize = 0;
+    var errors6: usize = 0;
+    for (parser_seeds) |sd| {
+        const p = fuzz_driver.frameOf(sd);
+        switch (parseV4(p, false)) {
+            .echo_reply => replies4 += 1,
+            .icmp_error => errors4 += 1,
+            .ignored => {},
+        }
+        if (parseV4(p, true) == .echo_reply) replies4 += 1;
+        switch (parseV6(p)) {
+            .echo_reply => replies6 += 1,
+            .icmp_error => errors6 += 1,
+            .ignored => {},
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 3), replies4); // reply, timestamp reply, stripped raw reply
+    try std.testing.expectEqual(@as(usize, 3), errors4);
+    try std.testing.expectEqual(@as(usize, 1), replies6);
+    try std.testing.expectEqual(@as(usize, 1), errors6);
 }

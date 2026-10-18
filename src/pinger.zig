@@ -116,6 +116,21 @@ pub const Outcome = union(enum) {
     duplicate: ReplyInfo,
     timeout,
     send_error: Socket.SendError,
+    /// An ICMP error (unreachable, time exceeded, ...) quoting one of our
+    /// probes. Informational: the probe itself still resolves via its
+    /// timeout, like in fping. The CLI renders it as fping's warning line.
+    icmp_error: IcmpError,
+};
+
+/// Details of an ICMP error received for one of our probes.
+pub const IcmpError = struct {
+    family: icmp.Family,
+    /// Raw ICMP (v4) or ICMPv6 type of the error message.
+    icmp_type: u8,
+    code: u8,
+    /// Address the error came from (usually a router, not the target);
+    /// null when the kernel did not report one.
+    from: ?Addr,
 };
 
 /// Per-probe callback. `probe` is the 0-based probe index within the target
@@ -270,7 +285,7 @@ const Target = struct {
     addr: Addr,
     stats: Stats = .{},
     /// Probes handed to sendto (including failed sends).
-    attempts: u16 = 0,
+    attempts: u32 = 0,
     /// Probes currently awaiting reply or timeout.
     pending: u16 = 0,
     /// Current probe timeout (grows with backoff in .alive mode).
@@ -500,11 +515,37 @@ pub const Pinger = struct {
         var now = monoNow();
 
         // Timeout events never need to wait on pacing; drain due ones first.
-        // Events whose probe was already answered are purged lazily
-        // regardless of their time, so they neither extend the next wait
-        // nor keep the round alive (fping removes them eagerly on reply,
-        // which a binary heap cannot do cheaply). Duplicate replies are
-        // therefore only counted while the answered slot is still queued.
+        try self.fireTimeouts(now);
+
+        // Transmit while the global gap, the in-flight cap and the subnet
+        // buckets allow it; consecutive due sends (only possible with a
+        // zero interval) go out as one sendmmsg batch.
+        try self.dispatchDue();
+        now = monoNow();
+
+        // A probe whose timeout is already due (-t 0, e.g. fping's
+        // `-p 0 -c 1` autotune) expires before its reply is read, as in
+        // fping where the event queue is served ahead of the socket.
+        try self.fireTimeouts(now);
+
+        self.drainReplies();
+
+        // All probes resolved and nothing left to send: the remaining
+        // timeout events only guarded duplicate detection — like fping,
+        // do not wait them out.
+        if (self.ping_q.items.len == 0 and self.inflight == 0) return null;
+
+        const wait = self.nextWaitNs(now) orelse return null;
+        return now + wait;
+    }
+
+    /// Process every due timeout event. Events whose probe was already
+    /// answered are purged lazily regardless of their time, so they neither
+    /// extend the next wait nor keep the round alive (fping removes them
+    /// eagerly on reply, which a binary heap cannot do cheaply). Duplicate
+    /// replies are therefore only counted while the answered slot is still
+    /// queued.
+    fn fireTimeouts(self: *Pinger, now: i64) RunError!void {
         while (self.timeout_q.peek()) |ev| {
             if (self.seqmap.fetch(ev.seq)) |entry| {
                 if (entry.target == ev.target and entry.probe == ev.probe) {
@@ -521,22 +562,6 @@ pub const Pinger = struct {
             // Released, reused or just-released slot: drop the stale event.
             _ = self.timeout_q.pop();
         }
-
-        // Transmit while the global gap, the in-flight cap and the subnet
-        // buckets allow it; consecutive due sends (only possible with a
-        // zero interval) go out as one sendmmsg batch.
-        try self.dispatchDue();
-        now = monoNow();
-
-        self.drainReplies();
-
-        // All probes resolved and nothing left to send: the remaining
-        // timeout events only guarded duplicate detection — like fping,
-        // do not wait them out.
-        if (self.ping_q.items.len == 0 and self.inflight == 0) return null;
-
-        const wait = self.nextWaitNs(now) orelse return null;
-        return now + wait;
     }
 
     /// Fill `buf` with the sockets to poll for readability between step()
@@ -679,7 +704,7 @@ pub const Pinger = struct {
             icmp.writeEchoRequest(t.addr.family(), buf, sock.ident, seq);
         }
 
-        t.attempts +%= 1;
+        t.attempts += 1;
         self.last_send_ns = now;
         if (self.cfg.subnet_gap_ns > 0)
             try self.subnet_last.put(self.gpa, t.addr.subnetKey(), now);
@@ -738,12 +763,14 @@ pub const Pinger = struct {
         self.inflight -= 1;
         self.emit(ev.target, ev.probe, .timeout);
 
-        if (self.cfg.mode == .alive and !t.done and t.attempts < 1 + self.cfg.retries) {
+        if (self.cfg.mode == .alive and !t.done and t.attempts <= @as(u32, self.cfg.retries)) {
             t.timeout_ns = backoff(t.timeout_ns, self.cfg.backoff_factor);
             try self.ping_q.push(self.gpa, .{
                 .time = now,
                 .target = ev.target,
-                .probe = ev.probe + 1,
+                // Wraps like the 16-bit probe index everywhere else (-r 65535
+                // makes 65536 attempts).
+                .probe = ev.probe +% 1,
             });
         } else {
             self.checkDone(t);
@@ -798,7 +825,9 @@ pub const Pinger = struct {
                 s.recv += 1;
                 s.last_ns = rtt;
                 s.total_ns += rtt;
-                if (s.min_ns == 0 or rtt < s.min_ns) s.min_ns = rtt;
+                // recv was just incremented: 1 means this is the first sample
+                // (a legitimate 0 ns RTT must not read as "unset").
+                if (s.recv == 1 or rtt < s.min_ns) s.min_ns = rtt;
                 if (rtt > s.max_ns) s.max_ns = rtt;
 
                 self.emit(entry.target, entry.probe, .{ .reply = reply_info });
@@ -811,6 +840,16 @@ pub const Pinger = struct {
                 // Informational only; the probe is resolved by its timeout
                 // (fping semantics).
                 self.targets.items[entry.target].stats.icmp_errors += 1;
+                self.emit(entry.target, entry.probe, .{ .icmp_error = .{
+                    .family = fam,
+                    .icmp_type = e.icmp_type,
+                    .code = e.code,
+                    .from = switch (info.src) {
+                        .none => null,
+                        .v4 => |sa| .{ .v4 = sa },
+                        .v6 => |sa| .{ .v6 = sa },
+                    },
+                } });
             },
             .ignored => {},
         }
@@ -838,6 +877,10 @@ pub const Pinger = struct {
 
     /// Read and process every already-received reply (non-blocking).
     fn drainReplies(self: *Pinger) void {
+        self.drainRepliesBounded(max_batches_per_drain);
+    }
+
+    fn drainRepliesBounded(self: *Pinger, max_batches: u32) void {
         // One realtime/monotonic pair converts kernel receive timestamps
         // (CLOCK_REALTIME) to the engine's monotonic clock.
         const mono_now = monoNow();
@@ -850,7 +893,11 @@ pub const Pinger = struct {
             };
             if (maybe_sock != null) {
                 const sock = self.socketFor(fam);
-                while (true) {
+                // Bounded so a flood of ICMP on a RAW socket cannot starve
+                // timeouts and the stop flag; the kernel keeps the rest and
+                // ppoll reports the socket readable again.
+                var batches: u32 = 0;
+                while (batches < max_batches) : (batches += 1) {
                     const infos = sock.recvBatch(&self.recv_batch);
                     if (infos.len == 0) break;
                     for (infos) |info| {
@@ -882,8 +929,9 @@ fn sourceMatches(src: Socket.RecvInfo.SrcAddr, target: Addr) bool {
     };
 }
 
-/// Upper bound for a backed-off timeout (~104 days): far beyond any real
-/// probe, yet `now + timeout` stays well inside i64.
+/// recvmmsg batches handled per socket and drainReplies() call.
+const max_batches_per_drain = 64;
+
 /// Upper bound for every nanosecond duration in Config. Durations are added
 /// to the monotonic clock as i64; 2^62 ns (~146 years) leaves headroom so
 /// the sum can never overflow, while being unreachable in practice.
@@ -1064,7 +1112,7 @@ test "embed API: prepare/step/pollFds round against loopback" {
 
     p.prepare() catch |e| switch (e) {
         // No ICMP socket privileges in this environment (CI sandbox).
-        error.PermissionDenied => return error.SkipZigTest,
+        error.PermissionDenied, error.AddressFamilyUnsupported => return error.SkipZigTest,
         else => return e,
     };
 
@@ -1084,4 +1132,506 @@ test "embed API: prepare/step/pollFds round against loopback" {
 
     try std.testing.expect(p.stats(id).alive());
     try std.testing.expectEqual(@as(u32, 1), p.stats(id).sent);
+}
+
+// ---- Socket-free engine tests ----------------------------------------------
+//
+// A Pinger is built without opening sockets: a Socket value with fd -1 is
+// installed by hand (only its kind/ident/family are consulted), probes go
+// through prepareProbe/commitProbe exactly like dispatchDue does (minus the
+// syscall), and crafted packets are fed to handleReply / fireTimeouts.
+
+const ms = std.time.ns_per_ms;
+
+/// Records every callback the engine makes.
+const Rec = struct {
+    const Kind = enum { reply, duplicate, timeout, send_error, icmp_error };
+    kinds: [32]Kind = undefined,
+    ids: [32]TargetId = undefined,
+    probes: [32]u16 = undefined,
+    n: usize = 0,
+    last_reply: ?ReplyInfo = null,
+    last_icmp: ?IcmpError = null,
+
+    fn cb(ctx: ?*anyopaque, id: TargetId, probe: u16, outcome: Outcome) void {
+        const r: *Rec = @ptrCast(@alignCast(ctx.?));
+        if (r.n < r.kinds.len) {
+            r.kinds[r.n] = switch (outcome) {
+                inline else => |_, tag| @field(Kind, @tagName(tag)),
+            };
+            r.ids[r.n] = id;
+            r.probes[r.n] = probe;
+        }
+        r.n += 1;
+        switch (outcome) {
+            .reply => |ri| r.last_reply = ri,
+            .icmp_error => |e| r.last_icmp = e,
+            else => {},
+        }
+    }
+
+    fn count(r: *const Rec, k: Kind) usize {
+        var c: usize = 0;
+        for (r.kinds[0..@min(r.n, r.kinds.len)]) |x| {
+            if (x == k) c += 1;
+        }
+        return c;
+    }
+};
+
+fn fakeSocket(family: Socket.Family, kind: Socket.Kind, ident: u16) Socket {
+    return .{ .fd = -1, .family = family, .kind = kind, .ident = ident };
+}
+
+fn testPinger(rec: *Rec, cfg: Config) !Pinger {
+    var p = try Pinger.init(std.testing.allocator, cfg);
+    p.setResultCallback(rec, Rec.cb);
+    p.sock4 = fakeSocket(.v4, .dgram, 0x1234);
+    p.sock6 = fakeSocket(.v6, .dgram, 0x4321);
+    return p;
+}
+
+/// Tear down without closing the fake descriptors.
+fn testDeinit(p: *Pinger) void {
+    p.sock4 = null;
+    p.sock6 = null;
+    p.deinit();
+}
+
+/// Everything dispatchDue does for one probe except the sendto syscall.
+fn sendProbe(p: *Pinger, id: TargetId, probe: u16, now: i64) !u16 {
+    const ev: Event = .{ .time = now, .target = id, .probe = probe };
+    const seq = try p.prepareProbe(ev, now, p.sendSlot(0));
+    try p.commitProbe(ev, seq, now);
+    return seq;
+}
+
+fn echoReply(buf: *[icmp.echo_header_len]u8, ident: u16, seq: u16) []u8 {
+    buf.* = @splat(0);
+    std.mem.writeInt(u16, buf[4..6], ident, .big);
+    std.mem.writeInt(u16, buf[6..8], seq, .big);
+    return buf;
+}
+
+/// ICMPv4 error quoting an echo request (no outer IP header: DGRAM style).
+fn errorV4(buf: *[icmp.echo_header_len + 20 + icmp.echo_header_len]u8, icmp_type: u8, code: u8, ident: u16, seq: u16) []u8 {
+    buf.* = @splat(0);
+    buf[0] = icmp_type;
+    buf[1] = code;
+    buf[8] = 0x45; // quoted IP header, IHL 5
+    const orig = buf[8 + 20 ..];
+    orig[0] = icmp.v4.echo_request;
+    std.mem.writeInt(u16, orig[4..6], ident, .big);
+    std.mem.writeInt(u16, orig[6..8], seq, .big);
+    return buf;
+}
+
+fn errorV6(buf: *[icmp.echo_header_len + 40 + icmp.echo_header_len]u8, icmp_type: u8, code: u8, ident: u16, seq: u16) []u8 {
+    buf.* = @splat(0);
+    buf[0] = icmp_type;
+    buf[1] = code;
+    buf[8 + 6] = 58; // quoted IPv6 header: next header ICMPv6
+    const orig = buf[8 + 40 ..];
+    orig[0] = icmp.v6.echo_request;
+    std.mem.writeInt(u16, orig[4..6], ident, .big);
+    std.mem.writeInt(u16, orig[6..8], seq, .big);
+    return buf;
+}
+
+fn srcV4(text: []const u8) Socket.RecvInfo.SrcAddr {
+    return .{ .v4 = (Addr.parse(text) catch unreachable).v4 };
+}
+
+test "engine: -r 65535 neither overflows nor retries forever" {
+    // `t.attempts < 1 + retries` used to add in u16 (panic), and attempts
+    // itself wrapped at 65536 sends, which would retry a dead host forever.
+    var rec: Rec = .{};
+    var p = try testPinger(&rec, .{ .mode = .alive, .retries = 65535 });
+    defer testDeinit(&p);
+    const id = try p.addTarget("192.0.2.1");
+    const t0 = monoNow();
+
+    // First attempt timed out: a retry must be scheduled.
+    const seq = try sendProbe(&p, id, 0, t0);
+    try p.handleTimeout(.{ .time = t0, .target = id, .probe = 0, .seq = seq }, t0);
+    try std.testing.expectEqual(@as(usize, 1), p.ping_q.items.len);
+    try std.testing.expect(!p.targets.items[id].done);
+
+    // 65536th attempt (the last one allowed) timed out, probe index 65535:
+    // no retry, and the retry event's index must not overflow either.
+    p.ping_q.items.len = 0;
+    p.targets.items[id].attempts = 65535;
+    const seq2 = try sendProbe(&p, id, 65535, t0);
+    try std.testing.expectEqual(@as(u32, 65536), p.targets.items[id].attempts);
+    try p.handleTimeout(.{ .time = t0, .target = id, .probe = 65535, .seq = seq2 }, t0);
+    try std.testing.expectEqual(@as(usize, 0), p.ping_q.items.len);
+    try std.testing.expect(p.targets.items[id].done);
+
+    // One attempt earlier the probe index wraps to 0 for the retry.
+    p.targets.items[id].done = false;
+    p.targets.items[id].attempts = 65534;
+    const seq3 = try sendProbe(&p, id, 65535, t0);
+    try p.handleTimeout(.{ .time = t0, .target = id, .probe = 65535, .seq = seq3 }, t0);
+    try std.testing.expectEqual(@as(u16, 0), p.ping_q.peek().?.probe);
+}
+
+test "engine: alive retries back off and stop after the configured count" {
+    var rec: Rec = .{};
+    var p = try testPinger(&rec, .{
+        .mode = .alive,
+        .retries = 2,
+        .timeout_ns = 100 * ms,
+        .backoff_factor = 2.0,
+        .interval_ns = 0,
+    });
+    defer testDeinit(&p);
+    const id = try p.addTarget("192.0.2.1");
+    const t = &p.targets.items[id];
+
+    // Attempt 1: timeout 100 ms.
+    const t0 = monoNow();
+    _ = try sendProbe(&p, id, 0, t0);
+    try std.testing.expectEqual(t0 + 100 * ms, p.timeout_q.peek().?.time);
+    try p.fireTimeouts(t0 + 100 * ms - 1);
+    try std.testing.expectEqual(@as(usize, 0), rec.n); // not due yet
+    try p.fireTimeouts(t0 + 100 * ms);
+    try std.testing.expectEqual(@as(usize, 1), rec.count(.timeout));
+    try std.testing.expectEqual(@as(u64, 200 * ms), t.timeout_ns);
+    try std.testing.expectEqual(@as(u16, 1), p.ping_q.peek().?.probe);
+    try std.testing.expectEqual(@as(u32, 0), p.inflight);
+    try std.testing.expectEqual(@as(u16, 0), t.pending);
+
+    // Attempt 2: timeout 200 ms.
+    const t1 = t0 + 100 * ms;
+    _ = p.ping_q.pop().?;
+    _ = try sendProbe(&p, id, 1, t1);
+    try std.testing.expectEqual(t1 + 200 * ms, p.timeout_q.peek().?.time);
+    try p.fireTimeouts(t1 + 200 * ms);
+    try std.testing.expectEqual(@as(u64, 400 * ms), t.timeout_ns);
+    try std.testing.expectEqual(@as(u16, 2), p.ping_q.peek().?.probe);
+
+    // Attempt 3 (= 1 + retries): timeout 400 ms, then the target is done.
+    const t2 = t1 + 200 * ms;
+    _ = p.ping_q.pop().?;
+    _ = try sendProbe(&p, id, 2, t2);
+    try std.testing.expectEqual(t2 + 400 * ms, p.timeout_q.peek().?.time);
+    try p.fireTimeouts(t2 + 400 * ms);
+    try std.testing.expectEqual(@as(usize, 0), p.ping_q.items.len);
+    try std.testing.expect(t.done);
+    try std.testing.expectEqual(@as(usize, 3), rec.count(.timeout));
+    try std.testing.expectEqual(@as(u32, 3), t.stats.sent);
+}
+
+test "engine: reply, duplicate and late reply lifecycle of one slot" {
+    var rec: Rec = .{};
+    var p = try testPinger(&rec, .{ .mode = .alive });
+    defer testDeinit(&p);
+    const id = try p.addTarget("192.0.2.1");
+    const t0 = monoNow();
+    const seq = try sendProbe(&p, id, 0, t0);
+    var buf: [icmp.echo_header_len]u8 = undefined;
+    const pkt = echoReply(&buf, 0x1234, seq);
+
+    p.handleReply(.v4, .{ .packet = pkt }, t0 + 3 * ms);
+    try std.testing.expectEqual(@as(u32, 1), p.stats(id).recv);
+    try std.testing.expectEqual(@as(u64, 3 * ms), p.stats(id).last_ns);
+    try std.testing.expectEqual(@as(u32, 0), p.inflight);
+    try std.testing.expectEqual(@as(u16, 0), p.targets.items[id].pending);
+    try std.testing.expect(p.targets.items[id].done);
+    try std.testing.expect(p.seqmap.fetch(seq).?.answered);
+    try std.testing.expectEqual(@as(usize, icmp.echo_header_len), rec.last_reply.?.size);
+
+    // A second reply while the slot is still queued is a duplicate and must
+    // not touch the in-flight accounting again.
+    p.handleReply(.v4, .{ .packet = pkt }, t0 + 4 * ms);
+    try std.testing.expectEqual(@as(u32, 1), p.stats(id).recv);
+    try std.testing.expectEqual(@as(u32, 1), p.stats(id).duplicates);
+    try std.testing.expectEqual(@as(usize, 1), rec.count(.duplicate));
+    try std.testing.expectEqual(@as(u32, 0), p.inflight);
+
+    // The timeout event of the answered slot releases it silently ...
+    try p.fireTimeouts(t0 + 1000 * ms);
+    try std.testing.expectEqual(@as(?SeqMap.Entry, null), p.seqmap.fetch(seq));
+    try std.testing.expectEqual(@as(usize, 0), p.timeout_q.items.len);
+    try std.testing.expectEqual(@as(usize, 0), rec.count(.timeout));
+
+    // ... after which a late reply is ignored altogether.
+    p.handleReply(.v4, .{ .packet = pkt }, t0 + 1001 * ms);
+    try std.testing.expectEqual(@as(u32, 1), p.stats(id).duplicates);
+    try std.testing.expectEqual(@as(usize, 2), rec.n);
+}
+
+test "engine: a stale timeout event neither expires nor frees a reused slot" {
+    var rec: Rec = .{};
+    var p = try testPinger(&rec, .{});
+    defer testDeinit(&p);
+    _ = try p.addTarget("192.0.2.1");
+    const other = try p.addTarget("192.0.2.2");
+    const t0 = monoNow();
+    // Slot 0 now belongs to the other target; the queued event is for an
+    // earlier (released) use of the same sequence number.
+    const seq = try p.seqmap.add(other, 0, t0);
+    p.targets.items[other].pending = 1;
+    p.inflight = 1;
+    try p.timeout_q.push(p.gpa, .{ .time = t0, .target = 0, .probe = 0, .seq = seq });
+    // Same target but another probe index is just as foreign.
+    try p.timeout_q.push(p.gpa, .{ .time = t0, .target = other, .probe = 9, .seq = seq });
+
+    try p.fireTimeouts(t0 + 1000 * ms);
+    try std.testing.expectEqual(@as(usize, 0), p.timeout_q.items.len);
+    try std.testing.expect(p.seqmap.fetch(seq) != null);
+    try std.testing.expectEqual(@as(usize, 0), rec.n);
+    try std.testing.expectEqual(@as(u32, 1), p.inflight);
+}
+
+test "engine: zero timeout expires before a reply that is already queued" {
+    // fping -p 0 -c 1 autotunes -t to 0: the probe times out even though
+    // the reply is sitting in the socket.
+    var rec: Rec = .{};
+    var p = try testPinger(&rec, .{ .mode = .count, .count = 1, .timeout_ns = 0, .retries = 0 });
+    defer testDeinit(&p);
+    const id = try p.addTarget("192.0.2.1");
+    const t0 = monoNow();
+    const seq = try sendProbe(&p, id, 0, t0);
+    try p.fireTimeouts(t0);
+    try std.testing.expectEqual(@as(usize, 1), rec.count(.timeout));
+    var buf: [icmp.echo_header_len]u8 = undefined;
+    p.handleReply(.v4, .{ .packet = echoReply(&buf, 0x1234, seq) }, t0 + ms);
+    try std.testing.expectEqual(@as(u32, 0), p.stats(id).recv);
+}
+
+test "engine: check-source accepts only the target's own address" {
+    var rec: Rec = .{};
+    var p = try testPinger(&rec, .{ .check_source = true });
+    defer testDeinit(&p);
+    const id = try p.addTarget("192.0.2.1");
+    const t0 = monoNow();
+    const seq = try sendProbe(&p, id, 0, t0);
+    var buf: [icmp.echo_header_len]u8 = undefined;
+    const pkt = echoReply(&buf, 0x1234, seq);
+
+    p.handleReply(.v4, .{ .packet = pkt, .src = srcV4("192.0.2.99") }, t0 + ms);
+    p.handleReply(.v4, .{ .packet = pkt, .src = .{ .v6 = (Addr.parse("2001:db8::1") catch unreachable).v6 } }, t0 + ms);
+    try std.testing.expectEqual(@as(u32, 2), p.stats(id).source_mismatches);
+    try std.testing.expectEqual(@as(u32, 0), p.stats(id).recv);
+    try std.testing.expect(!p.seqmap.fetch(seq).?.answered);
+    try std.testing.expectEqual(@as(u32, 1), p.inflight);
+
+    p.handleReply(.v4, .{ .packet = pkt, .src = srcV4("192.0.2.1") }, t0 + 2 * ms);
+    try std.testing.expectEqual(@as(u32, 1), p.stats(id).recv);
+    try std.testing.expectEqual(@as(u32, 2), p.stats(id).source_mismatches);
+
+    // Without check-source a foreign source is accepted.
+    p.cfg.check_source = false;
+    const seq2 = try sendProbe(&p, id, 1, t0);
+    p.handleReply(.v4, .{ .packet = echoReply(&buf, 0x1234, seq2), .src = srcV4("192.0.2.99") }, t0 + 3 * ms);
+    try std.testing.expectEqual(@as(u32, 2), p.stats(id).recv);
+}
+
+test "engine: RAW sockets compare the whole ident, DGRAM sockets trust the kernel" {
+    var rec: Rec = .{};
+    var p = try testPinger(&rec, .{});
+    defer testDeinit(&p);
+    const id = try p.addTarget("192.0.2.1");
+    p.sock4 = fakeSocket(.v4, .raw, 0x1234);
+    const t0 = monoNow();
+    const seq = try sendProbe(&p, id, 0, t0);
+
+    // RAW delivers the IP header too.
+    var pkt: [20 + icmp.echo_header_len]u8 = @splat(0);
+    pkt[0] = 0x45;
+    std.mem.writeInt(u16, pkt[26..28], seq, .big);
+    var bit: u4 = 0;
+    while (true) : (bit += 1) {
+        std.mem.writeInt(u16, pkt[24..26], 0x1234 ^ (@as(u16, 1) << bit), .big);
+        p.handleReply(.v4, .{ .packet = &pkt }, t0 + ms);
+        if (bit == 15) break;
+    }
+    try std.testing.expectEqual(@as(u32, 0), p.stats(id).recv);
+
+    std.mem.writeInt(u16, pkt[24..26], 0x1234, .big);
+    p.handleReply(.v4, .{ .packet = &pkt }, t0 + ms);
+    try std.testing.expectEqual(@as(u32, 1), p.stats(id).recv);
+    // The reported size excludes the IP header.
+    try std.testing.expectEqual(@as(u16, icmp.echo_header_len), rec.last_reply.?.size);
+
+    // DGRAM: the kernel rewrites/filters the ident, a mismatch is not ours
+    // to judge.
+    p.sock4 = fakeSocket(.v4, .dgram, 0x1234);
+    const seq2 = try sendProbe(&p, id, 1, t0);
+    var buf: [icmp.echo_header_len]u8 = undefined;
+    p.handleReply(.v4, .{ .packet = echoReply(&buf, 0x7777, seq2) }, t0 + ms);
+    try std.testing.expectEqual(@as(u32, 2), p.stats(id).recv);
+}
+
+test "engine: a reply for a target of the other family is ignored" {
+    var rec: Rec = .{};
+    var p = try testPinger(&rec, .{});
+    defer testDeinit(&p);
+    const id = try p.addTarget("2001:db8::1");
+    const seq = try sendProbe(&p, id, 0, monoNow());
+    var buf: [icmp.echo_header_len]u8 = undefined;
+    p.handleReply(.v4, .{ .packet = echoReply(&buf, 0x1234, seq) }, monoNow());
+    try std.testing.expectEqual(@as(u32, 0), p.stats(id).recv);
+    // The v6 socket does accept it (v6 echo reply type).
+    buf[0] = icmp.v6.echo_reply;
+    p.handleReply(.v6, .{ .packet = &buf }, monoNow());
+    try std.testing.expectEqual(@as(u32, 1), p.stats(id).recv);
+}
+
+test "engine: min RTT of 0 ns is a sample, not an unset marker" {
+    var rec: Rec = .{};
+    var p = try testPinger(&rec, .{ .mode = .count, .count = 2 });
+    defer testDeinit(&p);
+    const id = try p.addTarget("192.0.2.1");
+    const t0 = monoNow();
+    var buf: [icmp.echo_header_len]u8 = undefined;
+    const s0 = try sendProbe(&p, id, 0, t0);
+    p.handleReply(.v4, .{ .packet = echoReply(&buf, 0x1234, s0) }, t0); // rtt 0
+    const s1 = try sendProbe(&p, id, 1, t0);
+    p.handleReply(.v4, .{ .packet = echoReply(&buf, 0x1234, s1) }, t0 + 5 * ms);
+    const s = p.stats(id);
+    try std.testing.expectEqual(@as(u32, 2), s.recv);
+    try std.testing.expectEqual(@as(u64, 0), s.min_ns);
+    try std.testing.expectEqual(@as(u64, 5 * ms), s.max_ns);
+    try std.testing.expectEqual(@as(u64, 5 * ms), s.total_ns);
+}
+
+test "engine: max_inflight blocks dispatch without touching the queue" {
+    var rec: Rec = .{};
+    var p = try testPinger(&rec, .{ .max_inflight = 2, .interval_ns = 0 });
+    defer testDeinit(&p);
+    const id = try p.addTarget("192.0.2.1");
+    try p.ping_q.push(p.gpa, .{ .time = monoNow() - ms, .target = id, .probe = 0 });
+    p.inflight = 2;
+    try p.dispatchDue();
+    try std.testing.expectEqual(@as(usize, 1), p.ping_q.items.len);
+    try std.testing.expectEqual(@as(u32, 0), p.stats(id).sent);
+    try std.testing.expectEqual(@as(usize, 0), rec.n);
+}
+
+test "engine: ICMP error for a live probe is reported, the probe stays pending" {
+    var rec: Rec = .{};
+    var p = try testPinger(&rec, .{});
+    defer testDeinit(&p);
+    const id = try p.addTarget("10.9.9.77");
+    const t0 = monoNow();
+    const seq = try sendProbe(&p, id, 0, t0);
+    var buf: [icmp.echo_header_len + 20 + icmp.echo_header_len]u8 = undefined;
+
+    p.handleReply(.v4, .{ .packet = errorV4(&buf, 3, 13, 0x1234, seq), .src = srcV4("198.51.100.1") }, t0 + ms);
+    try std.testing.expectEqual(@as(usize, 1), rec.count(.icmp_error));
+    const e = rec.last_icmp.?;
+    try std.testing.expectEqual(icmp.Family.v4, e.family);
+    try std.testing.expectEqual(@as(u8, 3), e.icmp_type);
+    try std.testing.expectEqual(@as(u8, 13), e.code);
+    try std.testing.expect(e.from.?.sameHost(try Addr.parse("198.51.100.1")));
+    try std.testing.expectEqual(id, rec.ids[0]);
+    try std.testing.expectEqual(@as(u16, 0), rec.probes[0]);
+    try std.testing.expectEqual(@as(u32, 1), p.stats(id).icmp_errors);
+    // Informational only: still in flight, resolved later by its timeout.
+    try std.testing.expectEqual(@as(u32, 1), p.inflight);
+    try std.testing.expect(!p.targets.items[id].done);
+
+    // The raw ICMP type survives (source quench has no ErrorKind of its own).
+    p.handleReply(.v4, .{ .packet = errorV4(&buf, 4, 0, 0x1234, seq) }, t0 + ms);
+    try std.testing.expectEqual(@as(u8, 4), rec.last_icmp.?.icmp_type);
+    try std.testing.expectEqual(@as(?Addr, null), rec.last_icmp.?.from);
+
+    // Not ours: wrong ident, or no live seqmap entry.
+    const before = rec.n;
+    p.handleReply(.v4, .{ .packet = errorV4(&buf, 3, 1, 0x1235, seq) }, t0 + ms);
+    p.handleReply(.v4, .{ .packet = errorV4(&buf, 3, 1, 0x1234, seq +% 1) }, t0 + ms);
+    try std.testing.expectEqual(before, rec.n);
+    try std.testing.expectEqual(@as(u32, 2), p.stats(id).icmp_errors);
+
+    // Once the slot is released the error is stale.
+    try p.fireTimeouts(t0 + 1000 * ms);
+    p.handleReply(.v4, .{ .packet = errorV4(&buf, 3, 1, 0x1234, seq) }, t0 + 1001 * ms);
+    try std.testing.expectEqual(before + 1, rec.n); // +1: the timeout
+    try std.testing.expectEqual(@as(u32, 2), p.stats(id).icmp_errors);
+}
+
+test "engine: ICMPv6 error for a live probe is reported" {
+    var rec: Rec = .{};
+    var p = try testPinger(&rec, .{});
+    defer testDeinit(&p);
+    const id = try p.addTarget("2001:db8::77");
+    const seq = try sendProbe(&p, id, 0, monoNow());
+    var buf: [icmp.echo_header_len + 40 + icmp.echo_header_len]u8 = undefined;
+    const router: Socket.RecvInfo.SrcAddr = .{ .v6 = (Addr.parse("2001:db8::1") catch unreachable).v6 };
+    p.handleReply(.v6, .{ .packet = errorV6(&buf, 3, 1, 0x4321, seq), .src = router }, monoNow());
+    const e = rec.last_icmp.?;
+    try std.testing.expectEqual(icmp.Family.v6, e.family);
+    try std.testing.expectEqual(@as(u8, 3), e.icmp_type);
+    try std.testing.expectEqual(@as(u8, 1), e.code);
+    try std.testing.expect(e.from.?.sameHost(try Addr.parse("2001:db8::1")));
+    // Wrong ident: not ours.
+    p.handleReply(.v6, .{ .packet = errorV6(&buf, 3, 1, 0x4322, seq) }, monoNow());
+    try std.testing.expectEqual(@as(usize, 1), rec.count(.icmp_error));
+}
+
+test "engine: one drain handles a bounded number of recvmmsg batches" {
+    var rec: Rec = .{};
+    var p = try testPinger(&rec, .{});
+    defer testDeinit(&p);
+
+    var fds: [2]i32 = undefined;
+    if (linux.errno(linux.socketpair(linux.AF.UNIX, linux.SOCK.DGRAM | linux.SOCK.NONBLOCK, 0, &fds)) != .SUCCESS)
+        return error.SkipZigTest;
+    defer {
+        _ = linux.close(fds[0]);
+        _ = linux.close(fds[1]);
+    }
+    p.sock4 = .{ .fd = fds[0], .family = .v4, .kind = .dgram, .ident = 0x1234 };
+
+    // Queue more than two batches (the unix queue limit may cap it).
+    const junk: [icmp.echo_header_len]u8 = @splat(0);
+    var queued: usize = 0;
+    while (queued < 3 * Socket.batch_max) : (queued += 1) {
+        const rc = linux.sendto(fds[1], &junk, junk.len, 0, null, 0);
+        if (linux.errno(rc) != .SUCCESS) break;
+    }
+    if (queued <= 2 * Socket.batch_max) return error.SkipZigTest;
+
+    p.drainRepliesBounded(2);
+    var left: usize = 0;
+    while (true) {
+        const infos = p.sock4.?.recvBatch(&p.recv_batch);
+        left += infos.len;
+        if (infos.len == 0) break;
+    }
+    try std.testing.expectEqual(queued - 2 * Socket.batch_max, left);
+
+    // The default bound is 64 batches; everything queued here fits.
+    for (0..queued) |_| _ = linux.sendto(fds[1], &junk, junk.len, 0, null, 0);
+    p.drainReplies();
+    try std.testing.expectEqual(@as(usize, 0), p.sock4.?.recvBatch(&p.recv_batch).len);
+}
+
+test "embed API: -t 0 times out even on loopback (fping -p 0 -c 1)" {
+    var rec: Rec = .{};
+    var p = try Pinger.init(std.testing.allocator, .{
+        .mode = .count,
+        .count = 1,
+        .retries = 0,
+        .timeout_ns = 0,
+        .perhost_interval_ns = 0,
+        .interval_ns = 0,
+    });
+    defer p.deinit();
+    p.setResultCallback(&rec, Rec.cb);
+    const id = try p.addTarget("127.0.0.1");
+    p.prepare() catch |e| switch (e) {
+        error.PermissionDenied, error.AddressFamilyUnsupported => return error.SkipZigTest,
+        else => return e,
+    };
+    var iterations: u32 = 0;
+    while (try p.step()) |deadline| : (iterations += 1) {
+        try std.testing.expect(iterations < 1000);
+        p.waitReadable(deadline - monoNow());
+    }
+    try std.testing.expectEqual(@as(u32, 1), p.stats(id).sent);
+    try std.testing.expectEqual(@as(u32, 0), p.stats(id).recv);
+    try std.testing.expectEqual(@as(usize, 1), rec.count(.timeout));
 }

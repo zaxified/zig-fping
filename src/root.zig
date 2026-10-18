@@ -30,6 +30,7 @@ pub const Stats = pinger.Stats;
 pub const ReplyInfo = pinger.ReplyInfo;
 pub const Addr = pinger.Addr;
 pub const Outcome = pinger.Outcome;
+pub const IcmpError = pinger.IcmpError;
 pub const ResultFn = pinger.ResultFn;
 pub const TargetId = pinger.TargetId;
 pub const monoNow = pinger.monoNow;

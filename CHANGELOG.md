@@ -82,6 +82,100 @@ To be implemented once the change reaches an upstream release tag
   cmsg parsing for the reply's destination address, and that address carried
   through the reply struct into the renderers in `src/cli/output.zig`.
 
+### Golden-diff against fping 5.5
+
+- `scripts/fping-ref.sh` builds the pinned reference fping 5.5 (release
+  tarball with generated configure, SHA256-checked, no root, cached under
+  `.zig-cache/fping-ref-5.5/`) and prints the binary path.
+- `test/golden.sh` reads the reference version from `fping -v`: the existing
+  scenarios run against any reference, a new v5.5 block (`-b` limits, `-O`/`-H`
+  range checks, `-J`, `-X`, `--print-ttl`/`--print-tos`, `--icmp-timestamp`,
+  `--check-source`, `--timestamp-format`, `-Q N,cumulative`, `-k`, ...)
+  runs only against >= 5.5 and prints one SKIP line otherwise.
+- `scripts/test.sh` diffs against fping 5.5 and, when installed, the distro
+  fping as well (`FPING_REF=<path>` pins a single reference); CI and the
+  release workflow build 5.5 via the script and keep the apt 5.1 as well.
+
+### Fixes from the zig-libs survey
+
+- Reverse DNS (`-n`/`-d`, `src/rdns.zig`) now fails over like glibc: up to
+  three `nameserver` lines (MAXNS) instead of only the first; attempts
+  outside, servers inside; the next server on timeout, SERVFAIL, NOTIMP,
+  REFUSED, any other error rcode or TC=1 (no TCP fallback). NXDOMAIN and an
+  empty NOERROR end the lookup at once (they used to be retried, doubling the
+  resolver load for unnamed hosts).
+- `rdns.Options.timeout_ms`/`attempts` are now optional: when null,
+  resolv.conf `options timeout:N attempts:N` apply (capped at 30 s / 5 like
+  glibc), else the previous 2 s / 2 attempts. A caller value still wins; the
+  CLI passes none. `options rotate` is not implemented.
+- Reverse DNS responses are validated (RFC 5452): the UDP socket is
+  `connect`ed to the server, the question section must echo our name, type
+  and class, and only PTR records owned by the query name are taken, after
+  following CNAMEs (RFC 2317 delegations keep working). The query id comes
+  from `getrandom`.
+- `/etc/hosts` and resolv.conf larger than their read buffers are cut at the
+  last whole line instead of a partial line being parsed.
+- Engine: `-r 65535` no longer panics (the retry comparison added in `u16`;
+  the attempt counter is now `u32` so 65536 sends neither wrap nor retry a
+  dead host forever, and the retry's probe index wraps like everywhere else).
+- Engine: one reply drain handles at most 64 `recvmmsg` batches (1024
+  packets) per socket and step, so an ICMP flood on a RAW socket cannot starve
+  timeouts and the stop flag; the kernel keeps the rest and `ppoll` reports
+  the socket readable again.
+- Engine: a RTT of exactly 0 ns is a sample, not an "unset" marker, in the
+  engine statistics and in the CLI's `-Q`/`-s` min tracking.
+- `icmp.checksum` accumulates in `u64` (a `u32` overflowed past ~131 kB).
+- ICMP error warnings like fping: unreachable, source quench, redirect, time
+  exceeded and parameter problem (ICMPv6: destination unreachable, packet too
+  big, time exceeded, parameter problem) for a live probe are printed on
+  stderr as `<reason> from <router> for ICMP Echo sent to <host>` with
+  fping's wording, and suppressed by `-q`/`-Q` like `print_warning`. They
+  need a RAW socket (DGRAM ping sockets never receive them, same as fping).
+  Library API: new `Outcome.icmp_error: IcmpError` (`family`, `icmp_type`,
+  `code`, `from: ?Addr`), also exported as `zig_fping.IcmpError`;
+  `icmp.Reply.icmp_error` gained `icmp_type`. The probe still resolves via its
+  timeout.
+- `-g` beyond 131072 targets prints `<prog>: -g parameter generates too many
+  addresses` and exits 1 like fping (it printed the usage dump); an IPv6 range
+  whose upper 64 bits differ gets the same message.
+- Engine: timeouts due right after a send are served before the socket is
+  read, so `-p 0 -c 1` (fping autotunes `-t` to the period, 0 ms) reports a
+  timeout like fping instead of taking the loopback reply.
+- Socket-free engine tests (retry/backoff sequence, duplicate and late
+  replies, stale slot ownership, `--check-source`, RAW/DGRAM ident handling,
+  `max_inflight`, ICMP error correlation, bounded drain); golden scenarios for
+  `-g` overflow, `-p 0 -c 1` and real ICMP errors (a nested "router" network
+  namespace behind a veth pair, skipped when it cannot be created). The
+  live-socket tests skip instead of passing when no ICMP socket can be opened.
+
+### Deterministic fuzz driver
+
+Fuzzing no longer relies on `zig build --fuzz` (no progress, exit 0 on a
+crash, hangs invisible).
+
+- `src/testing/fuzz_driver.zig` (test-only, trimmed from zig-libs testkit, MIT
+  header kept) drives each harness from PRNG seeds in the ordinary ReleaseSafe
+  test binary: seed range via `ZFPING_FUZZ=<runs>[,<first>]`, a watchdog per
+  input (`HANG <target> seed=N`, exit 124), `FAIL <target> seed=N`, a seed file
+  for panics, replay of one seed or of a saved `--fuzz` input, reach counters.
+- The four harnesses (ICMP parsers, DNS `classify`/`expandName`, option parser,
+  `-g` generation) were degenerate: `smith.bytes` followed by a ranged length
+  draw gives length 0 in Smith's `.in` mode. They are now generic over their
+  choice source (`Rng` for the driver, a `Script` over one `Smith.slice` for
+  the optional `--fuzz` mode), draw one `slice`, start from seed corpora of real
+  inputs (v4/v6 echo replies and errors, PTR with a compression pointer,
+  RFC 2317 CNAME to PTR, option argv vectors, `-g` ranges and CIDRs) and check
+  oracles (strip path equals plain path, option spellings agree, generated
+  counts and boundary addresses, exact errors).
+- Reach counters per harness, and a test in every `zig build test` that runs 500
+  fixed seeds and fails if a labelled branch is never reached.
+- `scripts/fuzz.sh [secs]` builds the `fuzz-bins` step once (LLVM, ReleaseSafe),
+  runs all targets in parallel under `setsid -w timeout -s KILL`, prints a
+  verdict per job, seeds/s per target and reach; the manual CI `fuzz` job runs
+  it. Planted bugs in a copy of the tree (parse bound off by one, removed
+  pointer-loop guard, accepted zero count, /31 treated as /30) are found in
+  about two seconds each.
+
 ## 0.1.3 — last release for Zig 0.16 (2026-10-18)
 
 **This is the last zig-fping release that builds with Zig 0.16.** `main`
@@ -336,5 +430,9 @@ Each is marked with a comment at the relevant place in the code.
   sequence slots when the probe timeout fires; fping keeps them for the
   seqmap window but discards late replies anyway (fping issue #32), so
   behaviour matches (`src/pinger.zig` module docs).
-- Timestamp rendering uses /etc/localtime; POSIX rule strings in the TZ
-  environment variable are not interpreted (`src/tzlocal.zig`).
+- Timestamp rendering uses /etc/localtime (including its POSIX TZ footer);
+  the TZ environment variable is not consulted (`src/tzlocal.zig`).
+- Reverse DNS without resolv.conf `options timeout:` waits 2 s per query
+  instead of glibc's 5 s: with three nameservers and two attempts glibc
+  can block 30 s on one unresponsive address, which a 10k-host monitoring
+  run cannot afford (`src/rdns.zig`, `default_timeout_ms`).

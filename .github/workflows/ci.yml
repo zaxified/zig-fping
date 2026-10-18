@@ -4,9 +4,9 @@ on:
   push:
     branches: [main]
   pull_request:
-  # Instrumented fuzzing is run on demand (see the `fuzz` job): no corpus is
-  # persisted between CI runs, so a schedule would only re-explore the same
-  # shallow space over unchanged code. Trigger it after touching a parser.
+  # Fuzzing is run on demand (see the `fuzz` job): the seeds are
+  # deterministic, so a schedule would only repeat the same inputs over
+  # unchanged code. Trigger it after touching a parser.
   workflow_dispatch:
 
 permissions:
@@ -27,10 +27,22 @@ jobs:
         with:
           version: 0.17.0
 
-      # Reference binary for the golden-diff suite (test/golden.sh);
-      # ubuntu-latest ships fping 5.1.
-      - name: Install reference fping
+      # Reference binaries for the golden-diff suite (test/golden.sh): the
+      # distro fping (5.1 on ubuntu-latest, the oldest supported reference)
+      # plus fping 5.5 built from the release tarball by
+      # scripts/fping-ref.sh (the "Compatible-with release"). The test
+      # pipeline diffs against both. The 5.5 build is cached across runs.
+      - name: Install reference fping 5.1
         run: sudo apt-get update && sudo apt-get install -y fping
+
+      - name: Cache reference fping 5.5
+        uses: actions/cache@v4
+        with:
+          path: .zig-cache/fping-ref-5.5
+          key: fping-ref-5.5-${{ hashFiles('scripts/fping-ref.sh') }}
+
+      - name: Build reference fping 5.5
+        run: sh scripts/fping-ref.sh
 
       # Open ping_group_range so the embed-API unit test (opens an ICMP
       # socket against loopback) actually runs instead of self-skipping; the
@@ -64,8 +76,9 @@ jobs:
         if: ${{ !cancelled() }}
         run: zig build test -Dtarget=x86-linux -Doptimize=ReleaseSafe --summary all
 
-  # Instrumented fuzzing runs only on manual dispatch: scripts/fuzz.sh runs
-  # on the LLVM backend (--release=safe), like every other CI step.
+  # Fuzzing runs only on manual dispatch: scripts/fuzz.sh builds the test
+  # binaries once (LLVM, ReleaseSafe) and drives every harness from
+  # deterministic seeds, one process per core, with a hang watchdog.
   fuzz:
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
@@ -74,9 +87,5 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.17.0
-      # Same as the test job: let the embed-API unit test open its ICMP
-      # socket so `zig build test --fuzz` runs every test, none skipped.
-      - name: Allow unprivileged ICMP sockets
-        run: sudo sysctl -w net.ipv4.ping_group_range="0 2147483647"
-      - name: Fuzz (60s)
+      - name: Fuzz (60s window, deterministic seeds)
         run: sh scripts/fuzz.sh 60

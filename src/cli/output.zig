@@ -33,11 +33,12 @@ fn outcomeImpl(ctx: *Ctx, id: fping.TargetId, probe: u16, outcome: fping.Outcome
             st.sent_i += 1;
             st.recv_i += 1;
             st.total_i += r.rtt_ns;
-            if (st.min_i == 0 or r.rtt_ns < st.min_i) st.min_i = r.rtt_ns;
+            // recv_i/g_recv were just incremented: 1 = first sample (0 ns is a valid RTT).
+            if (st.recv_i == 1 or r.rtt_ns < st.min_i) st.min_i = r.rtt_ns;
             if (r.rtt_ns > st.max_i) st.max_i = r.rtt_ns;
             ctx.g_recv += 1;
             ctx.g_sum += r.rtt_ns;
-            if (ctx.g_min == 0 or r.rtt_ns < ctx.g_min) ctx.g_min = r.rtt_ns;
+            if (ctx.g_recv == 1 or r.rtt_ns < ctx.g_min) ctx.g_min = r.rtt_ns;
             if (r.rtt_ns > ctx.g_max) ctx.g_max = r.rtt_ns;
             if (probe < st.vcount_rtts.len) st.vcount_rtts[probe] = r.rtt_ns;
 
@@ -79,6 +80,12 @@ fn outcomeImpl(ctx: *Ctx, id: fping.TargetId, probe: u16, outcome: fping.Outcome
             st.resolved += 1;
             st.sent_i += 1;
         },
+        // fping's print_warning(): stderr, suppressed by -q (and -Q). The
+        // probe itself still resolves via its timeout.
+        .icmp_error => |e| if (!opts.quiet) {
+            try writeIcmpError(ctx.err, e, st.name);
+            try ctx.err.flush();
+        },
     }
 
     if (signals.snapshot_requested.swap(false, .monotonic)) {
@@ -98,6 +105,158 @@ fn outcomeImpl(ctx: *Ctx, id: fping.TargetId, probe: u16, outcome: fping.Outcome
             }
         }
     }
+}
+
+// ---- ICMP error warnings (fping decode_icmp_ipv4/ipv6) --------------------
+
+/// fping's icmp_type_str[], indexed by ICMP type 0..18.
+const icmp_type_str = [19][]const u8{
+    "ICMP Echo Reply",        "",                       "",                     "ICMP Unreachable",
+    "ICMP Source Quench",     "ICMP Redirect",          "",                     "",
+    "ICMP Echo",              "",                       "",                     "ICMP Time Exceeded",
+    "ICMP Parameter Problem", "ICMP Timestamp Request", "ICMP Timestamp Reply", "ICMP Information Request",
+    "ICMP Information Reply", "ICMP Mask Request",      "ICMP Mask Reply",
+};
+
+/// fping's icmp_unreach_str[], indexed by ICMP unreachable code 0..15.
+const icmp_unreach_str = [16][]const u8{
+    "ICMP Network Unreachable",
+    "ICMP Host Unreachable",
+    "ICMP Protocol Unreachable",
+    "ICMP Port Unreachable",
+    "ICMP Unreachable (Fragmentation Needed)",
+    "ICMP Unreachable (Source Route Failed)",
+    "ICMP Unreachable (Destination Network Unknown)",
+    "ICMP Unreachable (Destination Host Unknown)",
+    "ICMP Unreachable (Source Host Isolated)",
+    "ICMP Unreachable (Communication with Network Prohibited)",
+    "ICMP Unreachable (Communication with Host Prohibited)",
+    "ICMP Unreachable (Network Unreachable For Type Of Service)",
+    "ICMP Unreachable (Host Unreachable For Type Of Service)",
+    "ICMP Unreachable (Communication Administratively Prohibited)",
+    "ICMP Unreachable (Host Precedence Violation)",
+    "ICMP Unreachable (Precedence cutoff in effect)",
+};
+
+const icmp6_unreach_str = [10][]const u8{
+    "No route to destination",
+    "Communication with destination administratively prohibited",
+    "Beyond scope of source address",
+    "Address unreachable",
+    "Port unreachable",
+    "Source address failed ingress/egress policy",
+    "Reject route to destination",
+    "Error in Source Routing Header",
+    "Headers too long",
+    "Error in P-Route",
+};
+
+const icmp6_time_exceeded_str = [2][]const u8{
+    "Hop limit exceeded in transit",
+    "Fragment reassembly time exceeded",
+};
+
+const icmp6_param_prob_str = [11][]const u8{
+    "Erroneous header field encountered",
+    "Unrecognized Next Header type encountered",
+    "Unrecognized IPv6 option encountered",
+    "IPv6 First Fragment has incomplete IPv6 Header Chain",
+    "SR Upper-layer Header Error",
+    "Unrecognized Next Header type encountered by intermediate node",
+    "Extension header too big",
+    "Extension header chain too long",
+    "Too many extension headers",
+    "Too many options in extension header",
+    "Option too big",
+};
+
+/// Render one fping-style ICMP error line ("<reason> from <addr> for ICMP
+/// Echo sent to <host>\n"). `host` is the target as the user named it.
+pub fn writeIcmpError(w: *Io.Writer, e: fping.IcmpError, host: []const u8) Io.Writer.Error!void {
+    var from_buf: [64]u8 = undefined;
+    var from_w: Io.Writer = .fixed(&from_buf);
+    if (e.from) |a| a.format(&from_w) catch {};
+    const from = from_w.buffered();
+
+    switch (e.family) {
+        .v4 => {
+            if (e.icmp_type == fping.icmp.v4.dest_unreachable) {
+                if (e.code >= icmp_unreach_str.len)
+                    try w.writeAll("ICMP Unreachable (Invalid Code)")
+                else
+                    try w.writeAll(icmp_unreach_str[e.code]);
+            } else if (e.icmp_type < icmp_type_str.len) {
+                try w.writeAll(icmp_type_str[e.icmp_type]);
+            } else {
+                try w.print("ICMP {d}", .{e.icmp_type});
+            }
+            try w.print(" from {s} for ICMP Echo sent to {s}\n", .{ from, host });
+        },
+        .v6 => {
+            const v6 = fping.icmp.v6;
+            const tail_fmt = " from {s} for ICMPv6 Echo Request sent to {s}\n";
+            switch (e.icmp_type) {
+                v6.dest_unreachable => try writeV6Coded(w, "Destination Unreachable", &icmp6_unreach_str, e.code),
+                v6.packet_too_big => try w.writeAll("ICMPv6 Packet Too Big"),
+                v6.time_exceeded => try writeV6Coded(w, "Time Exceeded", &icmp6_time_exceeded_str, e.code),
+                v6.param_problem => try writeV6Coded(w, "Parameter Problem", &icmp6_param_prob_str, e.code),
+                else => try w.print("ICMPv6 Type {d} Code {d}", .{ e.icmp_type, e.code }),
+            }
+            try w.print(tail_fmt, .{ from, host });
+        },
+    }
+}
+
+fn writeV6Coded(w: *Io.Writer, name: []const u8, table: []const []const u8, code: u8) Io.Writer.Error!void {
+    if (code >= table.len)
+        try w.print("ICMPv6 {s} (Code {d})", .{ name, code })
+    else
+        try w.print("ICMPv6 {s} ({s})", .{ name, table[code] });
+}
+
+fn expectIcmpLine(expected: []const u8, e: fping.IcmpError, host: []const u8) !void {
+    var buf: [256]u8 = undefined;
+    var w: Io.Writer = .fixed(&buf);
+    try writeIcmpError(&w, e, host);
+    try std.testing.expectEqualStrings(expected, w.buffered());
+}
+
+test "icmp error lines match fping v4 wording" {
+    const from = fping.Addr.parse("198.51.100.1") catch unreachable;
+    const mk = struct {
+        fn f(t: u8, c: u8, a: fping.Addr) fping.IcmpError {
+            return .{ .family = .v4, .icmp_type = t, .code = c, .from = a };
+        }
+    }.f;
+    try expectIcmpLine("ICMP Network Unreachable from 198.51.100.1 for ICMP Echo sent to h.example\n", mk(3, 0, from), "h.example");
+    try expectIcmpLine("ICMP Unreachable (Communication Administratively Prohibited) from 198.51.100.1 for ICMP Echo sent to x\n", mk(3, 13, from), "x");
+    try expectIcmpLine("ICMP Unreachable (Precedence cutoff in effect) from 198.51.100.1 for ICMP Echo sent to x\n", mk(3, 15, from), "x");
+    // Code beyond the table.
+    try expectIcmpLine("ICMP Unreachable (Invalid Code) from 198.51.100.1 for ICMP Echo sent to x\n", mk(3, 16, from), "x");
+    try expectIcmpLine("ICMP Source Quench from 198.51.100.1 for ICMP Echo sent to x\n", mk(4, 0, from), "x");
+    try expectIcmpLine("ICMP Redirect from 198.51.100.1 for ICMP Echo sent to x\n", mk(5, 1, from), "x");
+    try expectIcmpLine("ICMP Time Exceeded from 198.51.100.1 for ICMP Echo sent to x\n", mk(11, 0, from), "x");
+    try expectIcmpLine("ICMP Parameter Problem from 198.51.100.1 for ICMP Echo sent to x\n", mk(12, 0, from), "x");
+    // Type beyond icmp_type_str.
+    try expectIcmpLine("ICMP 19 from 198.51.100.1 for ICMP Echo sent to x\n", mk(19, 0, from), "x");
+}
+
+test "icmp error lines match fping v6 wording" {
+    const from = fping.Addr.parse("2001:db8::1") catch unreachable;
+    const mk = struct {
+        fn f(t: u8, c: u8, a: fping.Addr) fping.IcmpError {
+            return .{ .family = .v6, .icmp_type = t, .code = c, .from = a };
+        }
+    }.f;
+    try expectIcmpLine("ICMPv6 Destination Unreachable (No route to destination) from 2001:db8::1 for ICMPv6 Echo Request sent to x\n", mk(1, 0, from), "x");
+    try expectIcmpLine("ICMPv6 Destination Unreachable (Error in P-Route) from 2001:db8::1 for ICMPv6 Echo Request sent to x\n", mk(1, 9, from), "x");
+    try expectIcmpLine("ICMPv6 Destination Unreachable (Code 10) from 2001:db8::1 for ICMPv6 Echo Request sent to x\n", mk(1, 10, from), "x");
+    try expectIcmpLine("ICMPv6 Packet Too Big from 2001:db8::1 for ICMPv6 Echo Request sent to x\n", mk(2, 0, from), "x");
+    try expectIcmpLine("ICMPv6 Time Exceeded (Fragment reassembly time exceeded) from 2001:db8::1 for ICMPv6 Echo Request sent to x\n", mk(3, 1, from), "x");
+    try expectIcmpLine("ICMPv6 Time Exceeded (Code 2) from 2001:db8::1 for ICMPv6 Echo Request sent to x\n", mk(3, 2, from), "x");
+    try expectIcmpLine("ICMPv6 Parameter Problem (Option too big) from 2001:db8::1 for ICMPv6 Echo Request sent to x\n", mk(4, 10, from), "x");
+    try expectIcmpLine("ICMPv6 Parameter Problem (Code 11) from 2001:db8::1 for ICMPv6 Echo Request sent to x\n", mk(4, 11, from), "x");
+    try expectIcmpLine("ICMPv6 Type 7 Code 3 from 2001:db8::1 for ICMPv6 Echo Request sent to x\n", mk(7, 3, from), "x");
 }
 
 fn printTimestamp(ctx: *Ctx, w: *Io.Writer) !void {

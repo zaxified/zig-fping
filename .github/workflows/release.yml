@@ -18,10 +18,22 @@ jobs:
         with:
           version: 0.17.0
 
-      # Reference binary for the golden-diff suite, same as ci.yml —
-      # release.sh runs the full test pipeline before building.
-      - name: Install reference fping
+      # Reference binaries for the golden-diff suite (test/golden.sh): the
+      # distro fping (5.1 on ubuntu-latest, the oldest supported reference)
+      # plus fping 5.5 built from the release tarball by
+      # scripts/fping-ref.sh (the "Compatible-with release"). The test
+      # pipeline diffs against both. The 5.5 build is cached across runs.
+      - name: Install reference fping 5.1
         run: sudo apt-get update && sudo apt-get install -y fping
+
+      - name: Cache reference fping 5.5
+        uses: actions/cache@v4
+        with:
+          path: .zig-cache/fping-ref-5.5
+          key: fping-ref-5.5-${{ hashFiles('scripts/fping-ref.sh') }}
+
+      - name: Build reference fping 5.5
+        run: sh scripts/fping-ref.sh
 
       # Same artifacts as a local `scripts/release.sh` run.
       - name: Build release artifacts

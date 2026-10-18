@@ -403,30 +403,9 @@ test "errors" {
     }
 }
 
-test "fuzz: option parser never crashes" {
-    // Runs as a smoke test under `zig build test`; becomes a real fuzz
-    // target with `zig build test --fuzz` (see scripts/fuzz.sh).
-    try std.testing.fuzz({}, fuzzParse, .{});
-}
-
-fn fuzzParse(_: void, smith: *std.testing.Smith) !void {
-    var buf: [256]u8 = undefined;
-    smith.bytes(&buf);
-    const len: usize = smith.valueRangeAtMost(u16, 0, buf.len);
-
-    // Split the byte soup on NUL into an argv-like token list.
-    var args_buf: [16][]const u8 = undefined;
-    var n: usize = 0;
-    var it = std.mem.splitScalar(u8, buf[0..len], 0);
-    while (it.next()) |tok| {
-        if (n == args_buf.len) break;
-        args_buf[n] = tok;
-        n += 1;
-    }
-
-    var diag: Diagnostic = .{};
-    var r = parse(std.testing.allocator, args_buf[0..n], &diag) catch return;
-    r.deinit(std.testing.allocator);
+test {
+    // Fuzz harness, seed corpus and reach test (test-only file).
+    _ = @import("options_fuzz.zig");
 }
 
 test "double dash ends options" {

@@ -11,6 +11,12 @@
 #   With no argument the CLI is built here. Pass a prebuilt binary (as
 #   scripts/release.sh does) to run functional/golden against that exact
 #   artifact instead of rebuilding it.
+#
+# Golden reference: FPING_REF=<path> pins one fping binary. Otherwise the
+# pinned fping 5.5 is built (cached) by scripts/fping-ref.sh, and the
+# distro fping (e.g. 5.1) is diffed as well when installed, so both the
+# oldest and the newest supported reference are covered. If 5.5 cannot be
+# built (no C compiler / network), the distro fping alone is used.
 
 set -eu
 
@@ -36,6 +42,19 @@ echo "==> functional tests (isolated namespace)"
 sh test/functional.sh "$ZFPING_BIN"
 
 echo "==> golden-diff tests against reference fping"
-sh test/golden.sh "$ZFPING_BIN"
+if [ -n "${FPING_REF:-}" ]; then
+    sh test/golden.sh "$ZFPING_BIN" "$FPING_REF"
+else
+    SYS_FPING=$(command -v fping || true)
+    if REF55=$(sh scripts/fping-ref.sh); then
+        sh test/golden.sh "$ZFPING_BIN" "$REF55"
+        if [ -n "$SYS_FPING" ]; then
+            sh test/golden.sh "$ZFPING_BIN" "$SYS_FPING"
+        fi
+    else
+        echo "warning: fping 5.5 reference unavailable, using the system fping" >&2
+        sh test/golden.sh "$ZFPING_BIN" "$SYS_FPING"
+    fi
+fi
 
 echo "==> all checks passed"

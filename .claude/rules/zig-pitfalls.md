@@ -18,7 +18,7 @@ class is caught once, in the cheapest place:
 | iterating on a fix | `zig build test` — LLVM Debug |
 | before ending work | `scripts/test.sh` — fmt, build, unit, functional and golden suites, all ReleaseSafe (the shipped mode) |
 | every push / PR | CI (`ci.yml`): the same `scripts/test.sh` plus cross-compiles, ReleaseSafe |
-| fuzzing | `scripts/fuzz.sh` / the manual CI `fuzz` job: `zig build test --fuzz --release=safe` |
+| fuzzing | `scripts/fuzz.sh` / the manual CI `fuzz` job: deterministic driver over the ReleaseSafe `fuzz-bins` test binaries (`zig build fuzz-bins`), one job per core, `HANG`/`FAIL seed=N`; never `zig build --fuzz` for a verdict |
 | releases | `scripts/release.sh`: ReleaseSafe, stripped, tested as the exact shipped binary |
 | benchmarks | `scripts/bench.sh`: ReleaseSafe, never Debug |
 

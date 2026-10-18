@@ -130,12 +130,28 @@ and has been stable on develop for a few months.
 ```sh
 scripts/test.sh            # canonical pipeline: fmt + build + unit + functional + golden
 scripts/release.sh         # release artifacts into releases/v<version>/
-scripts/fuzz.sh [secs]     # time-boxed fuzzing (LLVM via --release=safe, see header)
+scripts/fuzz.sh [secs]     # deterministic fuzz driver, ReleaseSafe, one job per core (see below)
 $ZIG build                 # library + zfping CLI
 $ZIG build test            # unit tests
 sh test/functional.sh      # functional suite (isolated user+net namespace)
 sh test/golden.sh          # byte-diff against reference fping (needs fping installed)
 ```
+
+Fuzzing: `hw run --slots 2 --name fz-zfping -- scripts/fuzz.sh 60`. The
+verdict comes from the **deterministic driver** (`src/testing/fuzz_driver.zig`,
+trimmed from zig-libs testkit), never from `zig build --fuzz` (no progress,
+exit 0 on a crash, hangs invisible). Each harness
+(`src/icmp.zig`, `src/rdns.zig`, `src/cli/options_fuzz.zig`,
+`src/cli/generate_fuzz.zig`) is `fn(comptime S, src: *S, gpa)` generic over its
+choice source: `Rng` (PRNG) for the driver, a `Script` built from one
+`Smith.slice` for the optional `zig build test --fuzz` — never
+`Smith{ .in = random bytes }`. A seed replays with
+`ZFPING_FUZZ=1,<seed> ZFPING_FUZZ_ONLY=<target> .zig-cache/fz/fuzz/fuzz-{lib,cli}`.
+Each harness has a seed corpus and `hit("label")` reach counters; the
+`fuzz harness: … reaches every branch` tests in `zig build test` fail if a
+label is not reached in 500 seeds. After changing a harness or the code's
+branching, re-check reach and plant a bug in a copy under `.zig-cache`
+(`FZ_ROOT=<copy> scripts/fuzz.sh`).
 
 Every compile step uses the LLVM backend; `-Dselfhosted=true` is for the
 edit loop only. Which command runs when (and in which mode):
