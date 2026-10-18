@@ -4,6 +4,10 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const strip = b.option(bool, "strip", "Strip debug info from the binary") orelse false;
+    // Self-hosted backend only on request, for the edit loop; every other
+    // build (Debug included) uses LLVM.
+    const selfhosted = b.option(bool, "selfhosted", "Use Zig's self-hosted backend (edit loop only)") orelse false;
+    const use_llvm: ?bool = if (selfhosted) null else true;
 
     // Library module exported to consumers (`@import("zig_fping")`).
     const mod = b.addModule("zig_fping", .{
@@ -15,6 +19,7 @@ pub fn build(b: *std.Build) void {
     // CLI front-end.
     const exe = b.addExecutable(.{
         .name = "zfping",
+        .use_llvm = use_llvm,
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = target,
@@ -37,9 +42,9 @@ pub fn build(b: *std.Build) void {
     run_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| run_cmd.addArgs(args);
 
-    const mod_tests = b.addTest(.{ .root_module = mod });
+    const mod_tests = b.addTest(.{ .root_module = mod, .use_llvm = use_llvm });
     const run_mod_tests = b.addRunArtifact(mod_tests);
-    const exe_tests = b.addTest(.{ .root_module = exe.root_module });
+    const exe_tests = b.addTest(.{ .root_module = exe.root_module, .use_llvm = use_llvm });
     const run_exe_tests = b.addRunArtifact(exe_tests);
 
     const test_step = b.step("test", "Run tests");

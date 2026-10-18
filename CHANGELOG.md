@@ -18,6 +18,15 @@ reviewed) and **Compatible-with release** (currently `v5.5`). The monthly
 caught up, and opens a separate `upstream-release` issue when upstream tags a
 new release — that is what triggers the deferred backlog.
 
+### Build: LLVM backend by default
+
+Every compile step in `build.zig` now sets `use_llvm`, so a plain Debug
+`zig build` / `zig build test` uses LLVM instead of Zig 0.16's self-hosted
+x86_64 backend. `-Dselfhosted=true` brings the self-hosted backend back for a
+fast edit loop. Release modes, CI and the scripts were already LLVM
+(ReleaseSafe) and are unchanged. The vendored `zig` skill moves to
+zig-skills `v0.16.0-r4`.
+
 ### Upstream commits reviewed
 
 Reviewed `develop` up to `bde54df` (2026-08-08); the previous pin was

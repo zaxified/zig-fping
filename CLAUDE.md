@@ -133,6 +133,10 @@ sh test/functional.sh      # functional suite (isolated user+net namespace)
 sh test/golden.sh          # byte-diff against reference fping (needs fping installed)
 ```
 
+Every compile step uses the LLVM backend; `-Dselfhosted=true` is for the
+edit loop only. Which command runs when (and in which mode):
+`.claude/rules/zig-pitfalls.md`.
+
 scripts/zig-env.sh resolves the pinned toolchain ($ZIG → PATH →
 .zig-toolchain/ → download from ziglang.org); CI and the release workflow
 call the same scripts.
