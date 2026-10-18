@@ -164,6 +164,13 @@ Modes:
 `run()` can be called repeatedly (statistics reset) — typically once per
 monitoring cycle.
 
+Caller mistakes in sizes and counts are returned errors, never debug-only
+asserts (they would compile out in ReleaseFast): e.g.
+`Pinger.init` → `error.MaxInflightTooLarge`, `icmp.writeEchoRequest` →
+`error.BufferTooSmall`, `Socket.sendMany` → `error.TooManyPackets`,
+`netutil.sortByDestinationPolicy` → `error.TooManyAddresses`,
+`rdns.lookupPtr` → `error.BufferTooSmall`.
+
 Threading: the engine is fully single-threaded and spawns no threads — one
 event loop multiplexing the 16-bit ICMP sequence space over at most two
 sockets. A `Pinger` instance must be driven by a single thread; the only
@@ -242,6 +249,8 @@ downloaded automatically into `.zig-toolchain/` when missing:
 
 ```sh
 scripts/test.sh      # fmt check + build + unit + functional + golden-diff
+                     #   (unit tests run in a double user namespace via scripts/netns-run,
+                     #   and fail on any unexpected skipped test)
 scripts/release.sh   # the above + static binaries for all targets
                      #   into releases/v<version>/ (tar.gz + SHA256SUMS)
 scripts/fuzz.sh      # deterministic-seed fuzzing of the parser/option/target harnesses

@@ -59,6 +59,12 @@ pub fn build(b: *std.Build) void {
     const run_exe_tests = b.addRunArtifact(exe_tests);
     const driver_tests = b.addTest(.{ .root_module = fuzz_driver, .use_llvm = use_llvm });
     const run_driver_tests = b.addRunArtifact(driver_tests);
+    // Always execute the test binaries (only their compilation is cached):
+    // a replayed "run test" would hide skip counts and the namespace the
+    // tests ran in (scripts/test.sh, scripts/netns-run).
+    run_mod_tests.has_side_effects = true;
+    run_exe_tests.has_side_effects = true;
+    run_driver_tests.has_side_effects = true;
 
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);

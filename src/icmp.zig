@@ -59,8 +59,9 @@ pub fn checksum(data: []const u8) u16 {
 /// Fill `buf` with an ICMP echo request. `buf.len` must be
 /// `echo_header_len + payload_size`; payload bytes beyond the header are
 /// expected to be pre-filled (pattern or zeroes) by the caller.
-pub fn writeEchoRequest(family: Family, buf: []u8, ident: u16, seq: u16) void {
-    std.debug.assert(buf.len >= echo_header_len);
+/// Returns error.BufferTooSmall when `buf` cannot hold the 8-byte header.
+pub fn writeEchoRequest(family: Family, buf: []u8, ident: u16, seq: u16) error{BufferTooSmall}!void {
+    if (buf.len < echo_header_len) return error.BufferTooSmall;
     buf[0] = switch (family) {
         .v4 => v4.echo_request,
         .v6 => v6.echo_request,
@@ -77,9 +78,10 @@ pub fn writeEchoRequest(family: Family, buf: []u8, ident: u16, seq: u16) void {
 }
 
 /// Fill `buf` (>= timestamp_msg_len) with an ICMP timestamp request
-/// (fping --icmp-timestamp; IPv4 only).
-pub fn writeTimestampRequest(buf: []u8, ident: u16, seq: u16, originate_ms: u32) void {
-    std.debug.assert(buf.len >= timestamp_msg_len);
+/// (fping --icmp-timestamp; IPv4 only). Returns error.BufferTooSmall when
+/// `buf` is shorter than timestamp_msg_len.
+pub fn writeTimestampRequest(buf: []u8, ident: u16, seq: u16, originate_ms: u32) error{BufferTooSmall}!void {
+    if (buf.len < timestamp_msg_len) return error.BufferTooSmall;
     buf[0] = v4.timestamp_request;
     buf[1] = 0;
     buf[2] = 0;
@@ -228,7 +230,7 @@ test "checksum of a buffer past the old u32 accumulator limit" {
 
 test "echo request round-trip v4 dgram" {
     var buf: [echo_header_len + 8]u8 = @splat(0);
-    writeEchoRequest(.v4, &buf, 0xabcd, 42);
+    try writeEchoRequest(.v4, &buf, 0xabcd, 42);
     // Packet checksum must verify (sum over whole packet == 0).
     try std.testing.expectEqual(@as(u16, 0), checksum(&buf));
     // A reply differs only in type; emulate kernel echo by flipping type.
@@ -290,7 +292,7 @@ test "comptime checksum" {
         const data = [_]u8{ 0x00, 0x01, 0xf2, 0x03, 0xf4, 0xf5, 0xf6, 0xf7 };
         std.debug.assert(checksum(&data) == 0x220d);
         var pkt: [echo_header_len + 4]u8 = @splat(0);
-        writeEchoRequest(.v4, &pkt, 0x1234, 7);
+        try writeEchoRequest(.v4, &pkt, 0x1234, 7);
         std.debug.assert(checksum(&pkt) == 0); // packet must verify
     }
 }
@@ -303,7 +305,7 @@ test "checksum property: inserting the checksum makes packets verify" {
     var pkt: [echo_header_len + 56]u8 = undefined;
     for (0..1000) |_| {
         random.bytes(&pkt);
-        writeEchoRequest(.v4, &pkt, random.int(u16), random.int(u16));
+        try writeEchoRequest(.v4, &pkt, random.int(u16), random.int(u16));
         try std.testing.expectEqual(@as(u16, 0), checksum(&pkt));
     }
 }
@@ -470,4 +472,101 @@ test "fuzz corpus: icmp seeds classify as documented" {
     try std.testing.expectEqual(@as(usize, 3), errors4);
     try std.testing.expectEqual(@as(usize, 1), replies6);
     try std.testing.expectEqual(@as(usize, 1), errors6);
+}
+
+test "echo request layout: v6 is type 128 with a zero checksum field, v4 is type 8" {
+    var buf: [echo_header_len + 4]u8 = @splat(0xaa);
+    try writeEchoRequest(.v6, &buf, 0x1234, 0x5678);
+    try std.testing.expectEqualSlices(u8, &.{ 128, 0, 0, 0, 0x12, 0x34, 0x56, 0x78 }, buf[0..8]);
+    try std.testing.expectEqualSlices(u8, &.{ 0xaa, 0xaa, 0xaa, 0xaa }, buf[8..]); // payload untouched
+
+    try writeEchoRequest(.v4, &buf, 0x1234, 0x5678);
+    try std.testing.expectEqual(@as(u8, 8), buf[0]);
+    try std.testing.expectEqualSlices(u8, &.{ 0x12, 0x34, 0x56, 0x78 }, buf[4..8]);
+}
+
+test "timestamp request layout: originate is big-endian, the rest zero, checksum verifies" {
+    var buf: [timestamp_msg_len]u8 = @splat(0xff);
+    try writeTimestampRequest(&buf, 0x0102, 0x0304, 0x0a0b0c0d);
+    try std.testing.expectEqualSlices(u8, &.{ 13, 0 }, buf[0..2]);
+    try std.testing.expectEqualSlices(u8, &.{ 0x01, 0x02, 0x03, 0x04 }, buf[4..8]);
+    try std.testing.expectEqualSlices(u8, &.{ 0x0a, 0x0b, 0x0c, 0x0d }, buf[8..12]);
+    try std.testing.expectEqualSlices(u8, &@as([8]u8, @splat(0)), buf[12..20]);
+    try std.testing.expectEqual(@as(u16, 0), checksum(&buf));
+}
+
+test "timestamp reply: each of the three timestamps is read from its own field" {
+    var pkt: [timestamp_msg_len]u8 = @splat(0);
+    pkt[0] = v4.timestamp_reply;
+    std.mem.writeInt(u16, pkt[4..6], 0x0a0b, .big);
+    std.mem.writeInt(u16, pkt[6..8], 0x0c0d, .big);
+    std.mem.writeInt(u32, pkt[8..12], 0x01020304, .big);
+    std.mem.writeInt(u32, pkt[12..16], 0x11121314, .big);
+    std.mem.writeInt(u32, pkt[16..20], 0x21222324, .big);
+    const r = parseV4(&pkt, false).echo_reply;
+    try std.testing.expectEqual(@as(u16, 0x0a0b), r.ident);
+    try std.testing.expectEqual(@as(u16, 0x0c0d), r.seq);
+    try std.testing.expectEqual(@as(u32, 0x01020304), r.ts.?.originate_ms);
+    try std.testing.expectEqual(@as(u32, 0x11121314), r.ts.?.receive_ms);
+    try std.testing.expectEqual(@as(u32, 0x21222324), r.ts.?.transmit_ms);
+}
+
+test "parseV4 follows the IP header lengths of the outer and the quoted header" {
+    // Outer header with options (IHL 6) in front of an echo reply.
+    var raw: [24 + echo_header_len]u8 = @splat(0);
+    raw[0] = 0x46;
+    raw[24] = v4.echo_reply;
+    std.mem.writeInt(u16, raw[28..30], 0xbeef, .big);
+    std.mem.writeInt(u16, raw[30..32], 0x0102, .big);
+    const r = parseV4(&raw, true).echo_reply;
+    try std.testing.expectEqual(@as(u16, 0xbeef), r.ident);
+    try std.testing.expectEqual(@as(u16, 0x0102), r.seq);
+
+    // Quoted header with options (IHL 6): the original request starts at 24.
+    var pkt: [echo_header_len + 24 + echo_header_len]u8 = @splat(0);
+    pkt[0] = v4.time_exceeded;
+    pkt[1] = 1;
+    pkt[8] = 0x46;
+    pkt[8 + 24] = v4.echo_request;
+    std.mem.writeInt(u16, pkt[8 + 24 + 4 ..][0..2], 0xcafe, .big);
+    std.mem.writeInt(u16, pkt[8 + 24 + 6 ..][0..2], 0x0304, .big);
+    const e = parseV4(&pkt, false).icmp_error;
+    try std.testing.expectEqual(ErrorKind.time_exceeded, e.kind);
+    try std.testing.expectEqual(@as(u16, 0xcafe), e.orig_ident);
+    try std.testing.expectEqual(@as(u16, 0x0304), e.orig_seq);
+}
+
+test "parseV4 error kinds: redirect and parameter problem keep their own kind" {
+    var pkt: [echo_header_len + 20 + echo_header_len]u8 = @splat(0);
+    pkt[8] = 0x45;
+    pkt[8 + 20] = v4.echo_request;
+    pkt[0] = v4.redirect;
+    try std.testing.expectEqual(ErrorKind.redirect, parseV4(&pkt, false).icmp_error.kind);
+    pkt[0] = v4.param_problem;
+    try std.testing.expectEqual(ErrorKind.param_problem, parseV4(&pkt, false).icmp_error.kind);
+    pkt[0] = v4.source_quench;
+    try std.testing.expectEqual(ErrorKind.other, parseV4(&pkt, false).icmp_error.kind);
+}
+
+test "parseV6 needs ICMPv6 as the quoted next header and an echo request behind it" {
+    var pkt: [echo_header_len + 40 + echo_header_len]u8 = @splat(0);
+    pkt[0] = v6.dest_unreachable;
+    pkt[8 + 6] = 17; // UDP
+    pkt[8 + 40] = v6.echo_request;
+    try std.testing.expectEqual(Reply.ignored, parseV6(&pkt));
+
+    pkt[8 + 6] = 58;
+    std.mem.writeInt(u16, pkt[8 + 40 + 4 ..][0..2], 0xbeef, .big);
+    std.mem.writeInt(u16, pkt[8 + 40 + 6 ..][0..2], 0x0102, .big);
+    const e = parseV6(&pkt).icmp_error;
+    try std.testing.expectEqual(@as(u16, 0xbeef), e.orig_ident);
+    try std.testing.expectEqual(@as(u16, 0x0102), e.orig_seq);
+
+    // ICMPv6 behind the header, but not an echo request of ours.
+    pkt[8 + 40] = v6.echo_reply;
+    try std.testing.expectEqual(Reply.ignored, parseV6(&pkt));
+
+    pkt[8 + 40] = v6.echo_request;
+    pkt[0] = v6.packet_too_big;
+    try std.testing.expectEqual(ErrorKind.packet_too_big, parseV6(&pkt).icmp_error.kind);
 }

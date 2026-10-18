@@ -35,8 +35,41 @@ if [ -z "$ZFPING_BIN" ]; then
     ZFPING_BIN=./zig-out/bin/zfping
 fi
 
-echo "==> zig build test (ReleaseSafe)"
-"$ZIG" build test -Doptimize=ReleaseSafe --summary all
+# Unit tests run through scripts/netns-run: a double user namespace with a
+# live loopback and unprivileged ICMP sockets but no CAP_NET_RAW, so the
+# live-socket tests run instead of skipping on hosts without ping_group_range.
+# The test run steps have side effects (build.zig), so they execute on every
+# run; only the compilation is cached.
+echo "==> zig build test (ReleaseSafe, double user namespace)"
+TEST_LOG=$(mktemp)
+trap 'rm -f "$TEST_LOG"' EXIT
+if ! "$REPO_ROOT/scripts/netns-run" "$ZIG" build test -Doptimize=ReleaseSafe \
+    --summary all >"$TEST_LOG" 2>&1; then
+    cat "$TEST_LOG"
+    echo "error: unit tests failed" >&2
+    exit 1
+fi
+cat "$TEST_LOG"
+
+# Skip guard: a skipped test passes silently, so count the skips in the
+# summary ("run test <N> pass, <M> skip (<T> total)" per test binary).
+# Intended skips are the deterministic fuzz-driver tests, which skip unless
+# ZFPING_FUZZ is set: "fuzz driver: icmp", "fuzz driver: rdns" (library
+# binary), "fuzz driver: options", "fuzz driver: generate" (CLI binary).
+# The summary does not name skipped tests, so the expected count is pinned.
+# Any other skip (no loopback, no ICMP socket, no IPv6) fails the gate.
+EXPECTED_SKIPS=4
+RAN=$(grep -c 'run test .* pass' "$TEST_LOG" || true)
+SKIPPED=$(sed -n 's/.*run test .* \([0-9][0-9]*\) skip.*/\1/p' "$TEST_LOG" | awk '{ n += $1 } END { print n + 0 }')
+if [ "$RAN" -eq 0 ]; then
+    echo "error: no 'run test' lines in the unit-test summary; cannot check skips" >&2
+    exit 1
+fi
+if [ "$SKIPPED" -ne "$EXPECTED_SKIPS" ]; then
+    echo "error: $SKIPPED skipped unit tests, expected exactly $EXPECTED_SKIPS (the fuzz-driver tests)" >&2
+    exit 1
+fi
+echo "unit tests: $SKIPPED skips, all intended (fuzz drivers)"
 
 echo "==> functional tests (isolated namespace)"
 sh test/functional.sh "$ZFPING_BIN"

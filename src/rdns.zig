@@ -33,9 +33,10 @@ pub const Options = struct {
 };
 
 /// Resolve `addr` to a host name. `out` must be at least 256 bytes.
-/// Returns null when no name could be found.
-pub fn lookupPtr(addr: Address, out: []u8, opts: Options) ?[]const u8 {
-    std.debug.assert(out.len >= 256);
+/// Returns null when no name could be found; error.BufferTooSmall when `out`
+/// is shorter than 256 bytes.
+pub fn lookupPtr(addr: Address, out: []u8, opts: Options) error{BufferTooSmall}!?[]const u8 {
+    if (out.len < 256) return error.BufferTooSmall;
     if (lookupHostsFile(addr, out, opts.hosts_path)) |name| return name;
     return lookupDns(addr, out, opts);
 }

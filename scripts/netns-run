@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: MIT
+# Adapted from zig-libs `scripts/lib/netns-run` (Copyright (c) 2026 zig-libs
+# contributors, MIT License).
+#
+# Run a command in a private network namespace, as the calling user.
+#
+#     scripts/netns-run CMD [ARGS...]
+#     scripts/netns-run --probe        # exit 0 if this host can do it
+#
+# The unit tests open real ICMP sockets on loopback. Two user namespaces, on
+# purpose:
+#   1. The outer one (`unshare -rn`) is uid 0 over the new netns only. It brings
+#      `lo` up -- a fresh netns starts with it DOWN -- checks that it is, and
+#      allows unprivileged ICMP sockets for every gid (a fresh netns starts with
+#      `ping_group_range` = `65534 65534`, i.e. nobody).
+#   2. The inner one maps the caller's uid/gid back, so CMD has exactly the
+#      privileges it has on the host: no CAP_NET_RAW, geteuid() != 0, files
+#      owned by the caller. A plain `unshare -rn` would run the tests as root
+#      with every capability and send them down privileged (SOCK_RAW) paths
+#      they never take for an ordinary user.
+#
+# CMD sees ZFPING_NETNS=1: loopback and DGRAM ICMP sockets are guaranteed, so
+# the live-socket tests run here instead of skipping (scripts/test.sh fails on
+# any unexpected skip).
+#
+# Needs unprivileged user namespaces. Exit 96 = not available here.
+set -euo pipefail
+
+if ! command -v unshare >/dev/null 2>&1 || ! command -v ip >/dev/null 2>&1; then
+    echo "netns-run: needs unshare (util-linux) and ip (iproute2)" >&2
+    exit 96
+fi
+
+uid=$(id -u)
+gid=$(id -g)
+
+if [[ "${1:-}" == "--probe" ]]; then
+    set -- true
+fi
+if [[ $# -eq 0 ]]; then
+    echo "usage: netns-run CMD [ARGS...] | netns-run --probe" >&2
+    exit 2
+fi
+
+if ! unshare --user --map-root-user --net -- \
+    unshare --user --map-user="$uid" --map-group="$gid" -- true >/dev/null 2>&1; then
+    echo "netns-run: unprivileged user + network namespaces are not available here" >&2
+    exit 96
+fi
+
+exec unshare --user --map-root-user --net -- /bin/sh -c '
+    set -e
+    ip link set lo up
+    ip -o link show lo | grep -q "LOWER_UP" || { echo "netns-run: lo did not come up" >&2; exit 97; }
+    echo "0 0" > /proc/sys/net/ipv4/ping_group_range
+    uid=$1; gid=$2; shift 2
+    exec unshare --user --map-user="$uid" --map-group="$gid" -- env ZFPING_NETNS=1 "$@"
+' netns-run "$uid" "$gid" "$@"

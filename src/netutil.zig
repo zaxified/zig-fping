@@ -59,6 +59,7 @@ fn policyPrecedence(addr: Addr) u8 {
             if ((b[0] & 0xfe) == 0xfc) return 3; // fc00::/7 (ULA)
             if (b[0] == 0xfe and (b[1] & 0xc0) == 0xc0) return 1; // fec0::/10
             if (std.mem.allEqual(u8, b[0..12], 0)) return 1; // ::/96
+            if (b[0] == 0x3f and b[1] == 0xfe) return 1; // 3ffe::/16 (6bone)
             return 40; // ::/0
         },
     }
@@ -91,17 +92,36 @@ fn destinationReachable(addr: Addr) bool {
     return linux.errno(crc) == .SUCCESS;
 }
 
+/// Largest slice sortByDestinationPolicy accepts.
+pub const max_sort_addrs = 64;
+
 /// Stable-sort addresses the way glibc's getaddrinfo orders results
 /// (fping pings the first one): RFC 6724 rule 1 (reachable destinations
 /// first, approximated by a route lookup) and rule 6 (higher precedence
 /// first). Source-address selection rules are not implemented — they only
-/// matter for multihomed corner cases.
-pub fn sortByDestinationPolicy(addrs: []Addr) void {
+/// matter for multihomed corner cases. At most `max_sort_addrs` addresses;
+/// error.TooManyAddresses otherwise (the slice is left untouched).
+pub fn sortByDestinationPolicy(addrs: []Addr) error{TooManyAddresses}!void {
+    const Probe = struct {
+        fn reachable(_: void, a: Addr) bool {
+            return destinationReachable(a);
+        }
+    };
+    return sortWithReachability(addrs, {}, Probe.reachable);
+}
+
+/// sortByDestinationPolicy with the route lookup injected: `reachable(ctx,
+/// addr)` decides RFC 6724 rule 1. A pure seam for deterministic tests.
+pub fn sortWithReachability(
+    addrs: []Addr,
+    ctx: anytype,
+    comptime reachable: fn (@TypeOf(ctx), Addr) bool,
+) error{TooManyAddresses}!void {
     if (addrs.len < 2) return;
-    var keys: [64]u16 = undefined;
-    std.debug.assert(addrs.len <= keys.len);
+    var keys: [max_sort_addrs]u16 = undefined;
+    if (addrs.len > keys.len) return error.TooManyAddresses;
     for (addrs, 0..) |a, i| {
-        const reach: u16 = if (destinationReachable(a)) 1 else 0;
+        const reach: u16 = if (reachable(ctx, a)) 1 else 0;
         keys[i] = reach << 8 | policyPrecedence(a);
     }
     // Insertion sort keeps it dependency-free and stable for equal keys.
@@ -126,13 +146,16 @@ test "policy precedence follows RFC 6724 table" {
     try std.testing.expectEqual(@as(u8, 30), policyPrecedence(try .parse("2002::1")));
     try std.testing.expectEqual(@as(u8, 5), policyPrecedence(try .parse("2001:0::1")));
     try std.testing.expectEqual(@as(u8, 3), policyPrecedence(try .parse("fd00::1")));
+    try std.testing.expectEqual(@as(u8, 1), policyPrecedence(try .parse("fec0::1")));
+    try std.testing.expectEqual(@as(u8, 1), policyPrecedence(try .parse("::c000:209")));
+    try std.testing.expectEqual(@as(u8, 1), policyPrecedence(try .parse("3ffe::9")));
 }
 
 test "destination policy prefers ::1 over 127.0.0.1 like glibc" {
     var addrs = [_]Addr{ try .parse("127.0.0.1"), try .parse("::1") };
     // Skip on hosts with IPv6 disabled (reachability then demotes ::1).
     if (!destinationReachable(addrs[1])) return error.SkipZigTest;
-    sortByDestinationPolicy(&addrs);
+    try sortByDestinationPolicy(&addrs);
     try std.testing.expectEqual(Addr.parse("::1"), addrs[0]);
 }
 
@@ -143,13 +166,13 @@ test "sort orders by precedence when all destinations are equally reachable" {
     const reach_a = destinationReachable(addrs[0]);
     const reach_b = destinationReachable(addrs[1]);
     if (reach_a != reach_b) return error.SkipZigTest;
-    sortByDestinationPolicy(&addrs);
+    try sortByDestinationPolicy(&addrs);
     try std.testing.expectEqual(Addr.parse("2606:4700::1111"), addrs[0]);
 }
 
 test "sort is stable for equal keys" {
     var addrs = [_]Addr{ try .parse("127.0.0.2"), try .parse("127.0.0.3") };
-    sortByDestinationPolicy(&addrs);
+    try sortByDestinationPolicy(&addrs);
     try std.testing.expectEqual(Addr.parse("127.0.0.2"), addrs[0]);
 }
 

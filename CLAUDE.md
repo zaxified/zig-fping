@@ -134,8 +134,18 @@ scripts/fuzz.sh [secs]     # deterministic fuzz driver, ReleaseSafe, one job per
 $ZIG build                 # library + zfping CLI
 $ZIG build test            # unit tests
 sh test/functional.sh      # functional suite (isolated user+net namespace)
-sh test/golden.sh          # byte-diff against reference fping (needs fping installed)
+sh test/golden.sh [zfping] [fping]  # byte-diff against a reference fping
+scripts/fping-ref.sh       # builds the fping 5.5 golden reference (cached in .zig-cache)
+scripts/netns-run CMD      # double user namespace: lo up, ICMP sockets, no CAP_NET_RAW
 ```
+
+`scripts/test.sh` runs the unit tests through `scripts/netns-run` (live-socket
+tests must run, not skip; it fails on any skip beyond the 4 intended
+fuzz-driver skips) and the golden suite against fping 5.5 (the
+Compatible-with release, v5.5-only scenarios gated on the reference version)
+and the distro fping 5.1. Mutation testing follows `~/.claude/mutation-testing.md`
+(schemata in a `.zig-cache` copy; last run 2026-10-18: 116/118 killed, the
+2 survivors equivalent).
 
 Fuzzing: `hw run --slots 2 --name fz-zfping -- scripts/fuzz.sh 60`. The
 verdict comes from the **deterministic driver** (`src/testing/fuzz_driver.zig`,

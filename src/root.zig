@@ -46,4 +46,9 @@ pub const LocalTz = @import("tzlocal.zig");
 
 test {
     @import("std").testing.refAllDecls(@This());
+    // Test-only files (oracle fixtures, error and allocation-failure checks).
+    _ = @import("testing/api_errors_test.zig");
+    _ = @import("testing/icmp_tcpdump_test.zig");
+    _ = @import("testing/alloc_failure_test.zig");
+    _ = @import("testing/rfc6724_test.zig");
 }

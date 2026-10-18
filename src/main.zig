@@ -240,7 +240,7 @@ pub fn main(init: std.process.Init) !void {
             var printname = name;
             if (opts.rdns or (opts.name_lookup and numeric)) {
                 var name_buf: [256]u8 = undefined;
-                if (fping.rdns.lookupPtr(rdnsAddress(addr), &name_buf, .{})) |ptr_name| {
+                if (fping.rdns.lookupPtr(rdnsAddress(addr), &name_buf, .{}) catch null) |ptr_name| {
                     printname = try arena.dupe(u8, ptr_name);
                 }
             }
@@ -548,7 +548,8 @@ fn resolveTarget(
     // fping takes getaddrinfo results in order, which glibc sorts per
     // RFC 6724 (e.g. ::1 before 127.0.0.1 for "localhost"); std's lookup
     // returns /etc/hosts and DNS order, so sort here to match.
-    fping.netutil.sortByDestinationPolicy(out_buf[0..n]);
+    // Only an over-long result (> max_sort_addrs) is refused; keep lookup order then.
+    fping.netutil.sortByDestinationPolicy(out_buf[0..n]) catch {};
     return if (all) out_buf[0..n] else out_buf[0..1];
 }
 
@@ -591,4 +592,5 @@ test {
     _ = @import("cli/output.zig");
     _ = @import("cli/stats.zig");
     _ = @import("cli/signals.zig");
+    _ = @import("cli/options_alloc_test.zig");
 }

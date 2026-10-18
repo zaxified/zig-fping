@@ -176,6 +176,70 @@ crash, hangs invisible).
   pointer-loop guard, accepted zero count, /31 treated as /30) are found in
   about two seconds each.
 
+### Library API hardening (breaking, before v0.2.0)
+
+Size and count preconditions on the public API were `std.debug.assert`s,
+which compile out in ReleaseFast (undefined behaviour for a library caller).
+They are now returned errors; internal invariants stay asserts. The CLI is
+unchanged: every call it makes is within the limits.
+
+- `icmp.writeEchoRequest` / `icmp.writeTimestampRequest` now return
+  `error{BufferTooSmall}!void` (buffer shorter than the 8-byte header /
+  `timestamp_msg_len`).
+- `Socket.sendMany` returns `error{ TooManyPackets, LengthMismatch }!usize`
+  (more than `batch_max` packets; `addrs` and `packets` of different length).
+- `Socket.recvBatch` returns `error{BufferTooSmall}![]const RecvInfo`
+  (slab shorter than `batch_max * slot_size`).
+- `Pinger.init` returns `error.MaxInflightTooLarge` when `max_inflight` does
+  not fit the 16-bit sequence space (`>= SeqMap.capacity`).
+- `netutil.sortByDestinationPolicy` returns `error.TooManyAddresses` for more
+  than `netutil.max_sort_addrs` (64) addresses and leaves the slice untouched;
+  `netutil.sortWithReachability` is the same sort with the route lookup
+  injected (a pure seam for tests).
+- `rdns.lookupPtr` returns `error{BufferTooSmall}!?[]const u8` (`out` shorter
+  than 256 bytes); `null` still means "no name found".
+- Fix: `netutil` gave `3ffe::/16` (6bone) precedence 40 instead of the RFC 6724
+  section 2.1 value 1, so it sorted ahead of `::/96`, `fec0::/10` and ULA
+  addresses. Found by the oracle replay below.
+
+### Tests
+
+- tcpdump-oracle ICMP error fixtures (`src/testing/tcpdump_fixtures.zig`, data
+  from zig-libs, MIT): kind, type, code and the quoted request's ident/seq of
+  11 IPv4/IPv6 errors, read from tcpdump's decoding, are compared with
+  `icmp.parseV4`/`parseV6` (bare and behind the IPv4 header). No mismatch.
+  The quoted source/destination addresses in the fixtures are not exposed by
+  `icmp.Reply` and are not compared.
+- RFC 6724 oracle replay (`src/testing/rfc6724_vectors.zig`, glibc 2.43
+  orderings from zig-libs, MIT) against `netutil.sortWithReachability` with a
+  stub that reports "usable" for entries glibc gave a source. Only pairs that
+  rules 1 and 6 decide are checked (1848 reachability pairs, 842 precedence
+  pairs where scope and label rules tie); the rest involve source selection
+  or rules 8/9, which are not implemented.
+- `std.testing.checkAllAllocationFailures` over `Pinger.init`, `addTarget` /
+  `addTargetAddr`, `prepare` and `options.parse`; no leak found.
+- A test per new error above (`src/testing/api_errors_test.zig`).
+- `scripts/netns-run` (adapted from zig-libs, MIT): a double user namespace
+  (outer `unshare -rn` brings up `lo` and opens `ping_group_range`, the inner
+  one maps the caller's uid back, so no `CAP_NET_RAW`). `scripts/test.sh`
+  runs `zig build test` through it with a private cache directory, so the
+  live-socket tests run instead of skipping on hosts without
+  `ping_group_range`.
+- Skip guard in `scripts/test.sh`: the gate fails unless exactly the four
+  intended skips occur (the fuzz-driver tests, which skip without
+  `ZFPING_FUZZ`).
+- Mutation pass over `icmp.zig` (parse bounds, type dispatch, id/seq/offset
+  reads, checksum), `seqmap.zig`, `pinger.zig` (reply correlation, stale-slot
+  ownership, retries, pacing gates, drain cap, stats, prepare resets) and the
+  `socket.zig` parsers, using one schemata build (118 mutants behind a runtime
+  switch, run under a 20 s cap): **64 of 118 killed before** (54%), **116 of
+  118 after**; the two survivors are equivalent (a `buf.len <= ihl` bound
+  whose remainder is empty either way, and an `init` clear that safe builds
+  mask with allocator poison). 33 tests added next to the code they pin
+  (redundant ownership guards in `fireTimeouts`/`handleTimeout`, the
+  `dispatchDue` gates, `failProbe`, `prepare()` resets, kernel receive
+  timestamps, ICMP timestamp/IHL-option layouts, cmsg bounds).
+
 ## 0.1.3 — last release for Zig 0.16 (2026-10-18)
 
 **This is the last zig-fping release that builds with Zig 0.16.** `main`

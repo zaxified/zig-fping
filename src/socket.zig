@@ -304,13 +304,16 @@ pub const batch_max = 16;
 /// Returns how many packets the kernel accepted; the caller retries the
 /// remainder via sendTo, which reports an accurate per-packet errno
 /// (sendmmsg stops at the first failure without saying why).
+/// error.TooManyPackets: more than batch_max packets;
+/// error.LengthMismatch: `addrs` and `packets` differ in length.
 pub fn sendMany(
     self: *const Socket,
     addrs: []const *const linux.sockaddr,
     addr_len: linux.socklen_t,
     packets: []const []const u8,
-) usize {
-    std.debug.assert(addrs.len == packets.len and packets.len <= batch_max);
+) error{ TooManyPackets, LengthMismatch }!usize {
+    if (packets.len > batch_max) return error.TooManyPackets;
+    if (addrs.len != packets.len) return error.LengthMismatch;
     var control: [64]u8 align(@alignOf(linux.cmsghdr)) = @splat(0);
     const control_len: usize = if (self.oiface_index != 0) self.buildPktinfo(&control) else 0;
 
@@ -393,8 +396,9 @@ pub const RecvBatch = struct {
 /// Read up to batch_max packets with one recvmmsg call. Returns the empty
 /// slice when the socket is drained (EAGAIN) or on transient errors; a
 /// full slice means more packets may be waiting — call again.
-pub fn recvBatch(self: *const Socket, b: *RecvBatch) []const RecvInfo {
-    std.debug.assert(b.slab.len >= batch_max * b.slot_size);
+/// error.BufferTooSmall: `b.slab` is shorter than batch_max * b.slot_size.
+pub fn recvBatch(self: *const Socket, b: *RecvBatch) error{BufferTooSmall}![]const RecvInfo {
+    if (b.slab.len < batch_max * b.slot_size) return error.BufferTooSmall;
     for (0..batch_max) |i| {
         b.iovs[i] = .{ .base = b.slab.ptr + i * b.slot_size, .len = b.slot_size };
         b.msgs[i] = .{
@@ -505,4 +509,42 @@ test "parseSrc reads the host-order address family" {
     try std.testing.expectEqual(@as(u8, 0xb8), src6.v6.addr[3]);
 
     try std.testing.expectEqual(RecvInfo.SrcAddr.none, parseSrc(&storage, 1));
+}
+
+test "parseSrc rejects an address shorter than its family needs" {
+    var storage: [@sizeOf(linux.sockaddr.in6)]u8 align(8) = @splat(0);
+    const sa6: linux.sockaddr.in6 = .{ .port = 0, .flowinfo = 0, .addr = @splat(0x11), .scope_id = 0 };
+    @memcpy(storage[0..], std.mem.asBytes(&sa6));
+    try std.testing.expectEqual(RecvInfo.SrcAddr.none, parseSrc(&storage, @sizeOf(linux.sockaddr.in)));
+    try std.testing.expect(parseSrc(&storage, @sizeOf(linux.sockaddr.in6)) == .v6);
+
+    const sa4: linux.sockaddr.in = .{ .port = 0, .addr = 0x01020304 };
+    storage = @splat(0);
+    @memcpy(storage[0..@sizeOf(linux.sockaddr.in)], std.mem.asBytes(&sa4));
+    try std.testing.expectEqual(RecvInfo.SrcAddr.none, parseSrc(&storage, @sizeOf(linux.sockaddr.in) - 1));
+    try std.testing.expectEqual(RecvInfo.SrcAddr.none, parseSrc(&storage, 8));
+    try std.testing.expect(parseSrc(&storage, @sizeOf(linux.sockaddr.in)) == .v4);
+}
+
+test "parseControl stops at a zero-length or overrunning cmsg and accepts an exact fit" {
+    var buf: [64]u8 align(@alignOf(linux.cmsghdr)) = @splat(0);
+    var info: RecvInfo = .{ .packet = &.{} };
+
+    // len == 0: must neither loop forever nor slice backwards.
+    parseControl(buf[0..48], &info);
+    try std.testing.expectEqual(@as(?u8, null), info.ttl);
+
+    // len beyond the buffer: the message is truncated, nothing is read.
+    const hdr: linux.cmsghdr = .{ .len = 100, .level = linux.SOL.IP, .type = linux.IP.TTL };
+    @memcpy(buf[0..@sizeOf(linux.cmsghdr)], std.mem.asBytes(&hdr));
+    parseControl(buf[0..48], &info);
+    try std.testing.expectEqual(@as(?u8, null), info.ttl);
+
+    // A message that ends exactly at the end of the buffer (no trailing
+    // alignment padding) is complete.
+    buf = @splat(0);
+    var off: usize = 0;
+    appendCmsg(&buf, &off, linux.SOL.IP, linux.IP.TTL, &std.mem.toBytes(@as(u32, 77)));
+    parseControl(buf[0 .. @sizeOf(linux.cmsghdr) + 4], &info);
+    try std.testing.expectEqual(@as(?u8, 77), info.ttl);
 }

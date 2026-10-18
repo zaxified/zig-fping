@@ -343,8 +343,10 @@ pub const Pinger = struct {
     /// Set asynchronously (e.g. from a signal handler) to end run().
     stop_requested: std.atomic.Value(bool) = .init(false),
 
-    pub fn init(gpa: std.mem.Allocator, config: Config) !Pinger {
-        std.debug.assert(config.max_inflight < SeqMap.capacity);
+    /// Fails with error.MaxInflightTooLarge when `config.max_inflight` does
+    /// not fit the 16-bit sequence space (must be < SeqMap.capacity).
+    pub fn init(gpa: std.mem.Allocator, config: Config) (error{ OutOfMemory, MaxInflightTooLarge })!Pinger {
+        if (config.max_inflight >= SeqMap.capacity) return error.MaxInflightTooLarge;
         const cfg = clampConfig(config);
         const pkt_len = if (cfg.icmp_timestamp)
             icmp.timestamp_msg_len
@@ -635,7 +637,8 @@ pub const Pinger = struct {
                     addrs[i] = self.targets.items[ev.target].addr.sockaddrPtr();
                     packets[i] = self.sendSlot(i);
                 }
-                accepted = sock.sendMany(addrs[0..n], t0.addr.sockaddrLen(), packets[0..n]);
+                // n <= batch_max by construction; on error fall back to single sends.
+                accepted = sock.sendMany(addrs[0..n], t0.addr.sockaddrLen(), packets[0..n]) catch 0;
             }
             for (events[0..n], seqs[0..n], 0..) |ev, seq, i| {
                 if (i < accepted) {
@@ -697,11 +700,12 @@ pub const Pinger = struct {
             return error.SequenceSpaceExhausted;
 
         if (self.cfg.icmp_timestamp) {
-            icmp.writeTimestampRequest(buf, sock.ident, seq, originateMs());
+            // Send slots are pkt_len bytes (sized in init): cannot be too small.
+            icmp.writeTimestampRequest(buf, sock.ident, seq, originateMs()) catch unreachable;
         } else {
             if (self.cfg.random_payload)
                 self.prng.random().bytes(buf[icmp.echo_header_len..]);
-            icmp.writeEchoRequest(t.addr.family(), buf, sock.ident, seq);
+            icmp.writeEchoRequest(t.addr.family(), buf, sock.ident, seq) catch unreachable;
         }
 
         t.attempts += 1;
@@ -898,7 +902,8 @@ pub const Pinger = struct {
                 // ppoll reports the socket readable again.
                 var batches: u32 = 0;
                 while (batches < max_batches) : (batches += 1) {
-                    const infos = sock.recvBatch(&self.recv_batch);
+                    // recv_slab is sized for batch_max slots in init.
+                    const infos = sock.recvBatch(&self.recv_batch) catch break;
                     if (infos.len == 0) break;
                     for (infos) |info| {
                         const recv_mono = if (info.timestamp_real_ns) |ts_real|
@@ -1597,7 +1602,7 @@ test "engine: one drain handles a bounded number of recvmmsg batches" {
     p.drainRepliesBounded(2);
     var left: usize = 0;
     while (true) {
-        const infos = p.sock4.?.recvBatch(&p.recv_batch);
+        const infos = try p.sock4.?.recvBatch(&p.recv_batch);
         left += infos.len;
         if (infos.len == 0) break;
     }
@@ -1606,7 +1611,7 @@ test "engine: one drain handles a bounded number of recvmmsg batches" {
     // The default bound is 64 batches; everything queued here fits.
     for (0..queued) |_| _ = linux.sendto(fds[1], &junk, junk.len, 0, null, 0);
     p.drainReplies();
-    try std.testing.expectEqual(@as(usize, 0), p.sock4.?.recvBatch(&p.recv_batch).len);
+    try std.testing.expectEqual(@as(usize, 0), (try p.sock4.?.recvBatch(&p.recv_batch)).len);
 }
 
 test "embed API: -t 0 times out even on loopback (fping -p 0 -c 1)" {
@@ -1634,4 +1639,437 @@ test "embed API: -t 0 times out even on loopback (fping -p 0 -c 1)" {
     try std.testing.expectEqual(@as(u32, 1), p.stats(id).sent);
     try std.testing.expectEqual(@as(u32, 0), p.stats(id).recv);
     try std.testing.expectEqual(@as(usize, 1), rec.count(.timeout));
+}
+
+// ---- Tests added from a mutation-testing pass ---------------------------------
+//
+// Each of these pins down behaviour that the suite above only exercised
+// through a redundant guard (fireTimeouts and handleTimeout both check slot
+// ownership) or not at all (dispatchDue gates, failProbe, prepare() resets).
+
+test "engine: fireTimeouts purges an answered slot before its deadline" {
+    var rec: Rec = .{};
+    var p = try testPinger(&rec, .{});
+    defer testDeinit(&p);
+    const id = try p.addTarget("192.0.2.1");
+    const t0 = monoNow();
+    const seq = try sendProbe(&p, id, 0, t0);
+    var buf: [icmp.echo_header_len]u8 = undefined;
+    p.handleReply(.v4, .{ .packet = echoReply(&buf, 0x1234, seq) }, t0 + ms);
+
+    // The event is 500 ms away; an answered slot is purged regardless.
+    try p.fireTimeouts(t0 + 2 * ms);
+    try std.testing.expectEqual(@as(?SeqMap.Entry, null), p.seqmap.fetch(seq));
+    try std.testing.expectEqual(@as(usize, 0), p.timeout_q.items.len);
+}
+
+test "engine: a stale timeout never releases an answered slot that was reused" {
+    var rec: Rec = .{};
+    var p = try testPinger(&rec, .{});
+    defer testDeinit(&p);
+    _ = try p.addTarget("192.0.2.1");
+    const other = try p.addTarget("192.0.2.2");
+    const t0 = monoNow();
+    const seq = try p.seqmap.add(other, 0, t0);
+    p.seqmap.fetchPtr(seq).?.answered = true;
+    // Foreign target, same probe index; and same target, foreign probe index.
+    try p.timeout_q.push(p.gpa, .{ .time = t0, .target = 0, .probe = 0, .seq = seq });
+    try p.timeout_q.push(p.gpa, .{ .time = t0, .target = other, .probe = 9, .seq = seq });
+
+    try p.fireTimeouts(t0 + 1000 * ms);
+    try std.testing.expectEqual(@as(usize, 0), p.timeout_q.items.len);
+    try std.testing.expect(p.seqmap.fetch(seq) != null);
+    try std.testing.expectEqual(@as(usize, 0), rec.n);
+}
+
+test "engine: handleTimeout on its own ignores a foreign slot and silently frees an answered one" {
+    var rec: Rec = .{};
+    var p = try testPinger(&rec, .{});
+    defer testDeinit(&p);
+    const mine = try p.addTarget("192.0.2.1");
+    const other = try p.addTarget("192.0.2.2");
+    const t0 = monoNow();
+    const seq = try p.seqmap.add(other, 0, t0);
+    p.targets.items[other].pending = 1;
+    p.inflight = 1;
+
+    try p.handleTimeout(.{ .time = t0, .target = mine, .probe = 0, .seq = seq }, t0);
+    try p.handleTimeout(.{ .time = t0, .target = other, .probe = 9, .seq = seq }, t0);
+    try std.testing.expect(p.seqmap.fetch(seq) != null);
+    try std.testing.expectEqual(@as(usize, 0), rec.n);
+    try std.testing.expectEqual(@as(u32, 1), p.inflight);
+
+    p.seqmap.fetchPtr(seq).?.answered = true;
+    try p.handleTimeout(.{ .time = t0, .target = other, .probe = 0, .seq = seq }, t0);
+    try std.testing.expectEqual(@as(?SeqMap.Entry, null), p.seqmap.fetch(seq));
+    try std.testing.expectEqual(@as(usize, 0), rec.n);
+    try std.testing.expectEqual(@as(u32, 1), p.inflight);
+    try std.testing.expectEqual(@as(u16, 1), p.targets.items[other].pending);
+}
+
+test "engine: a target that already answered is not retried when a sibling probe times out" {
+    var rec: Rec = .{};
+    var p = try testPinger(&rec, .{ .mode = .alive, .retries = 3 });
+    defer testDeinit(&p);
+    const id = try p.addTarget("192.0.2.1");
+    const t0 = monoNow();
+    const s0 = try sendProbe(&p, id, 0, t0);
+    const s1 = try sendProbe(&p, id, 1, t0);
+    var buf: [icmp.echo_header_len]u8 = undefined;
+    p.handleReply(.v4, .{ .packet = echoReply(&buf, 0x1234, s0) }, t0 + ms);
+    try std.testing.expect(p.targets.items[id].done);
+
+    try p.handleTimeout(.{ .time = t0 + 500 * ms, .target = id, .probe = 1, .seq = s1 }, t0 + 500 * ms);
+    try std.testing.expectEqual(@as(usize, 0), p.ping_q.items.len);
+    try std.testing.expectEqual(@as(u64, 500 * ms), p.targets.items[id].timeout_ns);
+}
+
+test "engine: an alive retry is due at the moment the timeout fired" {
+    var rec: Rec = .{};
+    var p = try testPinger(&rec, .{ .mode = .alive, .retries = 1, .timeout_ns = 100 * ms });
+    defer testDeinit(&p);
+    const id = try p.addTarget("192.0.2.1");
+    const t0 = monoNow();
+    const seq = try sendProbe(&p, id, 0, t0);
+    try p.handleTimeout(.{ .time = t0 + 100 * ms, .target = id, .probe = 0, .seq = seq }, t0 + 107 * ms);
+    try std.testing.expectEqual(t0 + 107 * ms, p.ping_q.peek().?.time);
+}
+
+test "engine: a reply stamped before its probe clamps the RTT to zero" {
+    var rec: Rec = .{};
+    var p = try testPinger(&rec, .{});
+    defer testDeinit(&p);
+    const id = try p.addTarget("192.0.2.1");
+    const t0 = monoNow();
+    const seq = try sendProbe(&p, id, 0, t0);
+    var buf: [icmp.echo_header_len]u8 = undefined;
+    p.handleReply(.v4, .{ .packet = echoReply(&buf, 0x1234, seq) }, t0 - 5 * ms);
+    try std.testing.expectEqual(@as(u32, 1), p.stats(id).recv);
+    try std.testing.expectEqual(@as(u64, 0), p.stats(id).last_ns);
+    try std.testing.expectEqual(@as(u64, 0), p.stats(id).max_ns);
+}
+
+test "engine: ttl, tos and the ICMP timestamp payload reach the reply callback" {
+    var rec: Rec = .{};
+    var p = try testPinger(&rec, .{});
+    defer testDeinit(&p);
+    const id = try p.addTarget("192.0.2.1");
+    const t0 = monoNow();
+    const seq = try sendProbe(&p, id, 0, t0);
+    var pkt: [icmp.timestamp_msg_len]u8 = @splat(0);
+    pkt[0] = icmp.v4.timestamp_reply;
+    std.mem.writeInt(u16, pkt[4..6], 0x1234, .big);
+    std.mem.writeInt(u16, pkt[6..8], seq, .big);
+    std.mem.writeInt(u32, pkt[8..12], 111, .big);
+    std.mem.writeInt(u32, pkt[12..16], 222, .big);
+    std.mem.writeInt(u32, pkt[16..20], 333, .big);
+    p.handleReply(.v4, .{ .packet = &pkt, .ttl = 61, .tos = 0xb8 }, t0 + ms);
+    const ri = rec.last_reply.?;
+    try std.testing.expectEqual(@as(?u8, 61), ri.ttl);
+    try std.testing.expectEqual(@as(?u8, 0xb8), ri.tos);
+    try std.testing.expectEqual(@as(u16, icmp.timestamp_msg_len), ri.size);
+    try std.testing.expectEqual(@as(u32, 111), ri.ts.?.originate_ms);
+    try std.testing.expectEqual(@as(u32, 222), ri.ts.?.receive_ms);
+    try std.testing.expectEqual(@as(u32, 333), ri.ts.?.transmit_ms);
+}
+
+test "engine: loop targets never finish and count targets wait for every probe" {
+    var rec: Rec = .{};
+    var p = try testPinger(&rec, .{ .mode = .loop });
+    defer testDeinit(&p);
+    const id = try p.addTarget("192.0.2.1");
+    const t0 = monoNow();
+    var buf: [icmp.echo_header_len]u8 = undefined;
+    const s0 = try sendProbe(&p, id, 0, t0);
+    p.handleReply(.v4, .{ .packet = echoReply(&buf, 0x1234, s0) }, t0 + ms);
+    try std.testing.expectEqual(@as(u16, 0), p.targets.items[id].pending);
+    try std.testing.expect(!p.targets.items[id].done);
+
+    p.cfg.mode = .count;
+    p.cfg.count = 3;
+    const s1 = try sendProbe(&p, id, 1, t0);
+    const s2 = try sendProbe(&p, id, 2, t0);
+    p.handleReply(.v4, .{ .packet = echoReply(&buf, 0x1234, s1) }, t0 + ms);
+    try std.testing.expectEqual(@as(u16, 1), p.targets.items[id].pending);
+    try std.testing.expect(!p.targets.items[id].done);
+    p.handleReply(.v4, .{ .packet = echoReply(&buf, 0x1234, s2) }, t0 + ms);
+    try std.testing.expect(p.targets.items[id].done);
+}
+
+test "engine: check-source compares IPv6 sources address by address" {
+    var rec: Rec = .{};
+    var p = try testPinger(&rec, .{ .check_source = true });
+    defer testDeinit(&p);
+    const id = try p.addTarget("2001:db8::1");
+    const t0 = monoNow();
+    const seq = try sendProbe(&p, id, 0, t0);
+    var buf: [icmp.echo_header_len]u8 = undefined;
+    const pkt = echoReply(&buf, 0x4321, seq);
+    pkt[0] = icmp.v6.echo_reply;
+
+    const wrong: Socket.RecvInfo.SrcAddr = .{ .v6 = (Addr.parse("2001:db8::2") catch unreachable).v6 };
+    p.handleReply(.v6, .{ .packet = pkt, .src = wrong }, t0 + ms);
+    try std.testing.expectEqual(@as(u32, 1), p.stats(id).source_mismatches);
+    try std.testing.expectEqual(@as(u32, 0), p.stats(id).recv);
+
+    const right: Socket.RecvInfo.SrcAddr = .{ .v6 = (Addr.parse("2001:db8::1") catch unreachable).v6 };
+    p.handleReply(.v6, .{ .packet = pkt, .src = right }, t0 + 2 * ms);
+    try std.testing.expectEqual(@as(u32, 1), p.stats(id).recv);
+}
+
+test "engine: min and max RTT follow the samples, the first one included" {
+    var rec: Rec = .{};
+    var p = try testPinger(&rec, .{ .mode = .count, .count = 3 });
+    defer testDeinit(&p);
+    const id = try p.addTarget("192.0.2.1");
+    const t0 = monoNow();
+    var buf: [icmp.echo_header_len]u8 = undefined;
+    const rtts = [_]i64{ 8, 5, 9 };
+    for (rtts, 0..) |rtt, i| {
+        const seq = try sendProbe(&p, id, @intCast(i), t0);
+        p.handleReply(.v4, .{ .packet = echoReply(&buf, 0x1234, seq) }, t0 + rtt * ms);
+    }
+    const s = p.stats(id);
+    try std.testing.expectEqual(@as(u64, 5 * ms), s.min_ns);
+    try std.testing.expectEqual(@as(u64, 9 * ms), s.max_ns);
+    try std.testing.expectEqual(@as(u64, 22 * ms), s.total_ns);
+    try std.testing.expectEqual(@as(u64, 9 * ms), s.last_ns);
+}
+
+test "engine: dispatchDue holds back an event that is not due yet" {
+    var rec: Rec = .{};
+    var p = try testPinger(&rec, .{ .interval_ns = 0 });
+    defer testDeinit(&p);
+    const id = try p.addTarget("192.0.2.1");
+    try p.ping_q.push(p.gpa, .{ .time = monoNow() + 10_000 * ms, .target = id, .probe = 0 });
+    try p.dispatchDue();
+    try std.testing.expectEqual(@as(usize, 1), p.ping_q.items.len);
+    try std.testing.expectEqual(@as(u32, 0), p.stats(id).sent);
+}
+
+test "engine: dispatchDue lets one packet per global gap leave" {
+    var rec: Rec = .{};
+    var p = try testPinger(&rec, .{ .interval_ns = 10_000 * ms });
+    defer testDeinit(&p);
+    const a = try p.addTarget("192.0.2.1");
+    const b = try p.addTarget("192.0.2.2");
+    const due = monoNow() - ms;
+    try p.ping_q.push(p.gpa, .{ .time = due, .target = a, .probe = 0 });
+    try p.ping_q.push(p.gpa, .{ .time = due, .target = b, .probe = 0 });
+
+    // A packet left just now: nothing may go out.
+    p.last_send_ns = monoNow();
+    try p.dispatchDue();
+    try std.testing.expectEqual(@as(usize, 2), p.ping_q.items.len);
+
+    // Gap elapsed: exactly one goes out, the gap restarts, the other waits.
+    p.last_send_ns = 0;
+    try p.dispatchDue();
+    try std.testing.expectEqual(@as(u32, 1), p.stats(a).sent + p.stats(b).sent);
+    try std.testing.expectEqual(@as(usize, 1), p.ping_q.items.len);
+}
+
+test "engine: dispatchDue never mixes address families in one batch" {
+    var rec: Rec = .{};
+    var p = try testPinger(&rec, .{ .interval_ns = 0 });
+    defer testDeinit(&p);
+    const a = try p.addTarget("192.0.2.1");
+    const b = try p.addTarget("2001:db8::1");
+    const now = monoNow();
+    try p.ping_q.push(p.gpa, .{ .time = now - 2 * ms, .target = a, .probe = 0 });
+    try p.ping_q.push(p.gpa, .{ .time = now - ms, .target = b, .probe = 0 });
+    try p.dispatchDue();
+    try std.testing.expectEqual(@as(u32, 1), p.stats(a).sent);
+    try std.testing.expectEqual(@as(u32, 1), p.stats(b).sent);
+    // The v6 probe took slot 0 of its own batch; slot 1 was never written.
+    try std.testing.expectEqual(icmp.v6.echo_request, p.sendSlot(0)[0]);
+    try std.testing.expectEqual(@as(u8, 0), p.sendSlot(1)[0]);
+}
+
+test "engine: dispatchDue defers a same-subnet event to the bucket's release time" {
+    var rec: Rec = .{};
+    var p = try testPinger(&rec, .{ .interval_ns = 0, .subnet_gap_ns = 50 * ms });
+    defer testDeinit(&p);
+    const a = try p.addTarget("192.0.2.10");
+    const b = try p.addTarget("192.0.2.20");
+    const now = monoNow();
+    try p.ping_q.push(p.gpa, .{ .time = now - 2 * ms, .target = a, .probe = 0 });
+    try p.ping_q.push(p.gpa, .{ .time = now - ms, .target = b, .probe = 0 });
+    try p.dispatchDue();
+    try std.testing.expectEqual(@as(u32, 1), p.stats(a).sent);
+    try std.testing.expectEqual(@as(u32, 0), p.stats(b).sent);
+    const stamped = p.subnet_last.get(p.targets.items[a].addr.subnetKey()).?;
+    try std.testing.expectEqual(@as(usize, 1), p.ping_q.items.len);
+    try std.testing.expectEqual(stamped + 50 * ms, p.ping_q.peek().?.time);
+}
+
+test "engine: a rejected send frees the slot, is counted and finishes the target" {
+    var rec: Rec = .{};
+    // The fake socket has descriptor -1, so every send fails.
+    var p = try testPinger(&rec, .{ .mode = .count, .count = 1, .interval_ns = 0 });
+    defer testDeinit(&p);
+    const id = try p.addTarget("192.0.2.1");
+    try p.ping_q.push(p.gpa, .{ .time = monoNow() - ms, .target = id, .probe = 0 });
+    try p.dispatchDue();
+    try std.testing.expectEqual(@as(u32, 1), p.stats(id).sent);
+    try std.testing.expectEqual(@as(u32, 1), p.stats(id).send_errors);
+    try std.testing.expectEqual(@as(usize, 1), rec.count(.send_error));
+    try std.testing.expectEqual(@as(?SeqMap.Entry, null), p.seqmap.fetch(0));
+    try std.testing.expectEqual(@as(u32, 0), p.inflight);
+    try std.testing.expect(p.targets.items[id].done);
+}
+
+test "engine: max_inflight caps the batch being collected, not just the running total" {
+    var rec: Rec = .{};
+    var p = try Pinger.init(std.testing.allocator, .{ .max_inflight = 2, .interval_ns = 0 });
+    defer p.deinit();
+    p.setResultCallback(&rec, Rec.cb);
+    p.sock4 = Socket.open(.v4, .auto, .{}) catch |e| switch (e) {
+        error.PermissionDenied, error.AddressFamilyUnsupported => return error.SkipZigTest,
+        else => return e,
+    };
+    const now = monoNow();
+    for (0..3) |_| {
+        const id = try p.addTarget("127.0.0.1");
+        try p.ping_q.push(p.gpa, .{ .time = now - ms, .target = id, .probe = 0 });
+    }
+    try p.dispatchDue();
+    try std.testing.expectEqual(@as(u32, 2), p.inflight);
+    try std.testing.expectEqual(@as(usize, 1), p.ping_q.items.len);
+    try std.testing.expectEqual(@as(usize, 0), rec.count(.send_error));
+}
+
+test "subnet keys: v4 and v6 never collide and v6 groups by /64" {
+    const v4 = try Addr.parse("192.0.2.5");
+    // First 8 octets 0:0:c0:2 equal the v4 key without its marker bit.
+    // (The marker bit is bit 32, so v6 prefixes 0:1:x:y still collide with
+    // a v4 /24; that range is reserved space and never routed.)
+    const v6 = try Addr.parse("0:0:c0:2::1");
+    try std.testing.expect(v4.subnetKey() != v6.subnetKey());
+
+    const same_a = try Addr.parse("2001:db8:0:1::1");
+    const same_b = try Addr.parse("2001:db8:0:1:ffff::2");
+    const other = try Addr.parse("2001:db8:0:2::1");
+    try std.testing.expectEqual(same_a.subnetKey(), same_b.subnetKey());
+    try std.testing.expect(same_a.subnetKey() != other.subnetKey());
+}
+
+test "scheduling: an overdue event waits zero, never a negative time" {
+    var p = try Pinger.init(std.testing.allocator, .{ .interval_ns = 0 });
+    defer p.deinit();
+    const id = try p.addTarget("192.0.2.1");
+    const now = monoNow();
+    try p.ping_q.push(p.gpa, .{ .time = now - 5 * ms, .target = id, .probe = 0 });
+    try std.testing.expectEqual(@as(?i64, 0), p.nextWaitNs(now));
+}
+
+test "engine: prepareProbe schedules the next probe from the nominal time and stamps the pacing state" {
+    var rec: Rec = .{};
+    var p = try testPinger(&rec, .{ .mode = .count, .count = 3, .perhost_interval_ns = 100 * ms, .subnet_gap_ns = 50 * ms });
+    defer testDeinit(&p);
+    const id = try p.addTarget("192.0.2.1");
+    const now = monoNow();
+    const ev: Event = .{ .time = now - 5 * ms, .target = id, .probe = 0 };
+    _ = try p.prepareProbe(ev, now, p.sendSlot(0));
+
+    const next = p.ping_q.peek().?;
+    try std.testing.expectEqual(now - 5 * ms + 100 * ms, next.time);
+    try std.testing.expectEqual(@as(u16, 1), next.probe);
+    try std.testing.expectEqual(id, next.target);
+    try std.testing.expectEqual(now, p.last_send_ns);
+    try std.testing.expectEqual(@as(?i64, now), p.subnet_last.get(p.targets.items[id].addr.subnetKey()));
+    try std.testing.expectEqual(@as(u32, 1), p.stats(id).sent);
+    try std.testing.expectEqual(@as(u32, 1), p.targets.items[id].attempts);
+
+    // The last probe of the round schedules nothing further.
+    p.ping_q.items.len = 0;
+    _ = try p.prepareProbe(.{ .time = now, .target = id, .probe = 2 }, now, p.sendSlot(0));
+    try std.testing.expectEqual(@as(usize, 0), p.ping_q.items.len);
+}
+
+test "engine: prepare spreads first probes over the jitter window and resets the round state" {
+    var rec: Rec = .{};
+    var p = try testPinger(&rec, .{ .jitter_ns = 1000 * ms, .timeout_ns = 700 * ms });
+    defer testDeinit(&p);
+    for (0..64) |_| _ = try p.addTarget("192.0.2.1");
+
+    // Leftovers of a previous round.
+    _ = try p.seqmap.add(3, 0, 1);
+    p.inflight = 5;
+    try p.ping_q.push(p.gpa, .{ .time = 1, .target = 0, .probe = 7 });
+    const t1 = &p.targets.items[1];
+    t1.timeout_ns = 9999;
+    t1.done = true;
+    t1.pending = 2;
+    t1.attempts = 3;
+    t1.stats.sent = 4;
+
+    const before = monoNow();
+    try p.prepare();
+    const after = monoNow();
+
+    try std.testing.expectEqual(@as(?SeqMap.Entry, null), p.seqmap.fetch(0));
+    try std.testing.expectEqual(@as(u32, 0), p.inflight);
+    try std.testing.expectEqual(@as(usize, 64), p.ping_q.items.len);
+    try std.testing.expectEqual(@as(u64, 700 * ms), t1.timeout_ns);
+    try std.testing.expect(!t1.done);
+    try std.testing.expectEqual(@as(u16, 0), t1.pending);
+    try std.testing.expectEqual(@as(u32, 0), t1.attempts);
+    try std.testing.expectEqual(@as(u32, 0), t1.stats.sent);
+
+    var lo: i64 = std.math.maxInt(i64);
+    var hi: i64 = std.math.minInt(i64);
+    for (p.ping_q.items) |ev| {
+        lo = @min(lo, ev.time);
+        hi = @max(hi, ev.time);
+    }
+    try std.testing.expect(lo >= before);
+    try std.testing.expect(hi < after + 1000 * ms);
+    try std.testing.expect(hi > lo); // 64 draws from a 1 s window are not all equal
+}
+
+test "engine: step keeps waiting while a probe is in flight and ends when nothing is" {
+    var rec: Rec = .{};
+    var p = try testPinger(&rec, .{ .timeout_ns = 500 * ms });
+    defer testDeinit(&p);
+    const id = try p.addTarget("192.0.2.1");
+    _ = try sendProbe(&p, id, 0, monoNow());
+    try std.testing.expect((try p.step()) != null);
+
+    // Only answered-slot events left (inflight 0): the round is over.
+    p.inflight = 0;
+    try std.testing.expectEqual(@as(?i64, null), try p.step());
+}
+
+test "engine: the kernel receive timestamp dates a reply, not the moment it is drained" {
+    var rec: Rec = .{};
+    var p = try testPinger(&rec, .{});
+    defer testDeinit(&p);
+
+    var fds: [2]i32 = undefined;
+    if (linux.errno(linux.socketpair(linux.AF.UNIX, linux.SOCK.DGRAM | linux.SOCK.NONBLOCK, 0, &fds)) != .SUCCESS)
+        return error.SkipZigTest;
+    defer {
+        _ = linux.close(fds[0]);
+        _ = linux.close(fds[1]);
+    }
+    const on: u32 = 1;
+    if (linux.errno(linux.setsockopt(fds[0], linux.SOL.SOCKET, linux.SO.TIMESTAMPNS_OLD, @ptrCast(&on), @sizeOf(u32))) != .SUCCESS)
+        return error.SkipZigTest;
+    p.sock4 = .{ .fd = fds[0], .family = .v4, .kind = .dgram, .ident = 0x1234 };
+
+    const id = try p.addTarget("192.0.2.1");
+    const seq = try sendProbe(&p, id, 0, monoNow());
+    var buf: [icmp.echo_header_len]u8 = undefined;
+    const pkt = echoReply(&buf, 0x1234, seq);
+    try std.testing.expect(linux.errno(linux.sendto(fds[1], pkt.ptr, pkt.len, 0, null, 0)) == .SUCCESS);
+
+    // The reply sits in the socket for 40 ms before the engine looks.
+    var nap: linux.timespec = .{ .sec = 0, .nsec = 40 * ms };
+    var no_fds: [1]linux.pollfd = undefined;
+    _ = linux.ppoll(&no_fds, 0, &nap, null);
+    p.drainReplies();
+
+    try std.testing.expectEqual(@as(u32, 1), p.stats(id).recv);
+    try std.testing.expect(p.stats(id).last_ns < 20 * ms);
 }
