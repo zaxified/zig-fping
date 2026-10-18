@@ -44,8 +44,25 @@ pub const SendError = error{
 
 /// Socket-level options applied at open time. All optional; mirrors the
 /// fping probing options that map to setsockopt calls.
+/// How a RAW socket picks its ICMP echo identifier. DGRAM sockets always use
+/// the kernel-assigned one, which is unique per socket.
+pub const RawIdent = union(enum) {
+    /// `pid & 0xffff`, as fping does (the default, so the CLI matches fping).
+    pid,
+    /// Distinct for every socket this process opens: a random base drawn once
+    /// per process plus a counter. Library improvement over fping: several
+    /// Pinger instances in one process (or several processes) running RAW
+    /// sockets would otherwise share the pid ident and could take each
+    /// other's replies.
+    unique,
+    /// A caller-chosen identifier.
+    fixed: u16,
+};
+
 pub const Options = struct {
     recv_buf_size: u32 = 1 << 20,
+    /// Echo identifier of a RAW socket (ignored for DGRAM sockets).
+    raw_ident: RawIdent = .pid,
     /// IP TTL / IPv6 unicast hops (fping -H).
     ttl: ?u8 = null,
     /// IP TOS / IPv6 traffic class (fping -O).
@@ -99,6 +116,45 @@ oiface_index: u32 = 0,
 /// IPv4 source for the pktinfo spec_dst field when both -S and --oiface
 /// are used (network byte order; 0 = unset).
 pktinfo_src4: u32 = 0,
+
+var unique_base: std.atomic.Value(u32) = .init(0);
+var unique_next: std.atomic.Value(u16) = .init(0);
+
+fn rawIdent(mode: RawIdent) u16 {
+    return switch (mode) {
+        .pid => @intCast(linux.getpid() & 0xffff),
+        .fixed => |v| v,
+        .unique => uniqueIdent(),
+    };
+}
+
+/// Random per-process base (bit 16 marks it initialised) plus a counter, so
+/// up to 65536 sockets of one process never share an identifier.
+fn uniqueIdent() u16 {
+    var base = unique_base.load(.acquire);
+    if (base == 0) {
+        var r: [2]u8 = undefined;
+        const rc = linux.getrandom(&r, r.len, 0);
+        const rnd: u16 = if (linux.errno(rc) == .SUCCESS and rc == r.len)
+            std.mem.readInt(u16, &r, .little)
+        else
+            @truncate(@as(u32, @bitCast(linux.getpid())));
+        const fresh: u32 = @as(u32, 1 << 16) | rnd;
+        base = unique_base.cmpxchgStrong(0, fresh, .acq_rel, .acquire) orelse fresh;
+    }
+    return @as(u16, @truncate(base)) +% unique_next.fetchAdd(1, .monotonic);
+}
+
+test "RawIdent: pid matches fping, fixed is verbatim, unique never repeats in-process" {
+    try std.testing.expectEqual(@as(u16, @intCast(linux.getpid() & 0xffff)), rawIdent(.pid));
+    try std.testing.expectEqual(@as(u16, 0xbeef), rawIdent(.{ .fixed = 0xbeef }));
+    var seen: std.StaticBitSet(1 << 16) = .empty;
+    for (0..1000) |_| {
+        const id = rawIdent(.unique);
+        try std.testing.expect(!seen.isSet(id));
+        seen.set(id);
+    }
+}
 
 pub fn open(family: Family, mode: Mode, opts: Options) OpenError!Socket {
     const domain: u32 = switch (family) {
@@ -194,7 +250,7 @@ pub fn open(family: Family, mode: Mode, opts: Options) OpenError!Socket {
         self.ident = try self.boundIdent();
     }
 
-    if (kind == .raw) self.ident = @intCast(linux.getpid() & 0xffff);
+    if (kind == .raw) self.ident = rawIdent(opts.raw_ident);
 
     return self;
 }

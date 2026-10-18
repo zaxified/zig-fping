@@ -202,6 +202,13 @@ unchanged: every call it makes is within the limits.
   section 2.1 value 1, so it sorted ahead of `::/96`, `fec0::/10` and ULA
   addresses. Found by the oracle replay below.
 
+- New `Config.raw_ident` / `Socket.Options.raw_ident` (`.pid`, `.unique`,
+  `.fixed`): the echo identifier of RAW sockets. `.pid` (default, used by the
+  CLI) is fping's `pid & 0xffff`; `.unique` gives every socket of the process
+  its own identifier (random per-process base plus a counter), so several
+  Pinger instances in one embedding process cannot take each other's
+  replies. DGRAM sockets keep the kernel-assigned identifier.
+
 ### Tests
 
 - tcpdump-oracle ICMP error fixtures (`src/testing/tcpdump_fixtures.zig`, data

@@ -76,6 +76,10 @@ pub const Config = struct {
     /// (fping --check-source).
     check_source: bool = false,
     socket_mode: Socket.Mode = .auto,
+    /// Echo identifier of RAW sockets. `.pid` matches fping (the CLI uses
+    /// it); embedders running several Pinger instances should pick
+    /// `.unique` so instances cannot take each other's replies.
+    raw_ident: Socket.RawIdent = .pid,
     /// SO_RCVBUF for the ICMP sockets.
     recv_buf_size: u32 = 1 << 20,
     /// IP TTL / IPv6 unicast hops (fping -H).
@@ -438,6 +442,7 @@ pub const Pinger = struct {
             .fwmark = self.cfg.fwmark,
             .iface = self.cfg.iface,
             .oiface_index = oiface_index,
+            .raw_ident = self.cfg.raw_ident,
         };
         if (need4 and self.sock4 == null) {
             var opts = base;
