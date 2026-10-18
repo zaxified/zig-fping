@@ -148,6 +148,11 @@ To be implemented once the change reaches an upstream release tag
   namespace behind a veth pair, skipped when it cannot be created). The
   live-socket tests skip instead of passing when no ICMP socket can be opened.
 
+- `--check-source` now rejects a reply when no source address is available
+  (fail closed; unreachable on Linux, where recvmsg always reports it).
+- Pacing buckets: IPv4 /24 keys no longer collide with the IPv6 /64s
+  `0:1:xxxx:xxxx::/64` (keys widened to u128).
+
 ### Deterministic fuzz driver
 
 Fuzzing no longer relies on `zig build --fuzz` (no progress, exit 0 on a

@@ -251,12 +251,14 @@ pub const Addr = union(icmp.Family) {
     }
 
     /// Bucket key for subnet pacing: /24 for IPv4, /64 for IPv6.
-    fn subnetKey(self: Addr) u64 {
+    /// Pacing bucket: the /24 for IPv4, the /64 for IPv6. Every u64 is a
+    /// possible v6 /64, so v4 keys live above bit 64 to never collide.
+    fn subnetKey(self: Addr) u128 {
         switch (self) {
             .v4 => |sa| {
                 const bytes = std.mem.toBytes(sa.addr);
                 const prefix = std.mem.readInt(u32, &bytes, .big) >> 8;
-                return (1 << 32) | @as(u64, prefix);
+                return (1 << 64) | @as(u128, prefix);
             },
             .v6 => |sa| {
                 return std.mem.readInt(u64, sa.addr[0..8], .big);
@@ -334,7 +336,7 @@ pub const Pinger = struct {
     /// (CLOCK_MONOTONIC is always far past any pacing interval at startup).
     last_send_ns: i64 = 0,
     inflight: u32 = 0,
-    subnet_last: std.AutoHashMapUnmanaged(u64, i64) = .empty,
+    subnet_last: std.AutoHashMapUnmanaged(u128, i64) = .empty,
     prng: std.Random.DefaultPrng,
     /// Socket.batch_max packet slots for batched sends (slot 0 doubles as
     /// the single-send buffer).
@@ -927,7 +929,9 @@ pub const Pinger = struct {
 
 fn sourceMatches(src: Socket.RecvInfo.SrcAddr, target: Addr) bool {
     return switch (src) {
-        .none => true, // no source info available; cannot verify
+        // No source info (never happens on Linux, recvmsg always fills it):
+        // the source cannot be verified, so --check-source rejects the reply.
+        .none => false,
         .v4 => |sa| switch (target) {
             .v4 => |ta| sa.addr == ta.addr,
             .v6 => false,
@@ -1946,11 +1950,12 @@ test "engine: max_inflight caps the batch being collected, not just the running 
 
 test "subnet keys: v4 and v6 never collide and v6 groups by /64" {
     const v4 = try Addr.parse("192.0.2.5");
-    // First 8 octets 0:0:c0:2 equal the v4 key without its marker bit.
-    // (The marker bit is bit 32, so v6 prefixes 0:1:x:y still collide with
-    // a v4 /24; that range is reserved space and never routed.)
+    // First 8 octets 0:0:c0:2 equal the v4 key without its marker bit, and
+    // 0:1:c0:2 equals the old u64 key with the marker at bit 32.
     const v6 = try Addr.parse("0:0:c0:2::1");
     try std.testing.expect(v4.subnetKey() != v6.subnetKey());
+    const v6_marker = try Addr.parse("0:1:00c0:0002::1");
+    try std.testing.expect(v4.subnetKey() != v6_marker.subnetKey());
 
     const same_a = try Addr.parse("2001:db8:0:1::1");
     const same_b = try Addr.parse("2001:db8:0:1:ffff::2");
@@ -2077,4 +2082,9 @@ test "engine: the kernel receive timestamp dates a reply, not the moment it is d
 
     try std.testing.expectEqual(@as(u32, 1), p.stats(id).recv);
     try std.testing.expect(p.stats(id).last_ns < 20 * ms);
+}
+
+test "check-source rejects a reply whose source the kernel did not report" {
+    const t = try Addr.parse("192.0.2.7");
+    try std.testing.expect(!sourceMatches(.none, t));
 }
