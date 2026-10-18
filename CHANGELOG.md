@@ -153,6 +153,24 @@ To be implemented once the change reaches an upstream release tag
 - Pacing buckets: IPv4 /24 keys no longer collide with the IPv6 /64s
   `0:1:xxxx:xxxx::/64` (keys widened to u128).
 
+### Library options
+- `Config.icmp_errors_dgram` (default off, library only; the CLI and its
+  output are unchanged): report ICMP errors on unprivileged DGRAM ("ping")
+  sockets, which the kernel never delivers through the receive path.
+  Sets `IP_RECVERR` / `IPV6_RECVERR` (`Socket.Options.recv_errors`) and
+  drains the socket error queue (`Socket.recvErr`, `MSG_ERRQUEUE`) on every
+  reply drain, bounded like the reply drain, so the permanently raised
+  POLLERR cannot make the loop spin. Entries are correlated exactly like the
+  RAW ICMP-error path (echo ident against the socket's, seq via the seqmap)
+  and reported as `Outcome.icmp_error` with `from` = the offender address
+  (`SO_EE_OFFENDER`, the router). Counting is unchanged: the probe still
+  resolves by its timeout. Non-ICMP origins (EMSGSIZE ...) and malformed
+  entries are dropped. Modelled on zig-libs `icmp`. Tests: crafted
+  cmsg/datagram parsing (v4, v6, offender present/absent, other origin,
+  truncated), engine correlation tests, and a live scenario in
+  `test/functional.sh` (driver `src/testing/recverr_driver.zig` against the
+  nested router namespace).
+
 ### Deterministic fuzz driver
 
 Fuzzing no longer relies on `zig build --fuzz` (no progress, exit 0 on a

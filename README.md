@@ -164,6 +164,14 @@ Modes:
 `run()` can be called repeatedly (statistics reset) — typically once per
 monitoring cycle.
 
+Opt-in library option `icmp_errors_dgram` (default off, not exposed by the
+CLI): without root the engine uses unprivileged DGRAM sockets, which never
+receive ICMP errors, so a router's "host unreachable" looks like silence.
+With `.icmp_errors_dgram = true` the engine enables `IP_RECVERR` /
+`IPV6_RECVERR`, drains the socket error queue and reports each error as
+`Outcome.icmp_error` (`from` = the router that sent it). As with RAW
+sockets the error does not end the probe; the timeout still decides.
+
 Caller mistakes in sizes and counts are returned errors, never debug-only
 asserts (they would compile out in ReleaseFast): e.g.
 `Pinger.init` → `error.MaxInflightTooLarge`, `icmp.writeEchoRequest` →

@@ -10,6 +10,26 @@ set -u
 
 Z="${1:-./zig-out/bin/zfping}"
 
+# Library-only feature test (Config.icmp_errors_dgram): the zfping CLI does
+# not expose it, so build a small driver once, outside the namespace. Needs
+# $ZIG (scripts/test.sh exports it) or a zig on PATH; skipped without one.
+RECVERR_DRIVER="${RECVERR_DRIVER:-}"
+if [ -z "${ZFPING_IN_NS:-}" ] && [ -z "$RECVERR_DRIVER" ]; then
+    zig_bin="${ZIG:-$(command -v zig 2>/dev/null || true)}"
+    if [ -n "$zig_bin" ] && [ -f src/testing/recverr_driver.zig ]; then
+        mkdir -p .zig-cache/recverr
+        if "$zig_bin" build-exe -fllvm -O ReleaseSafe --dep zig_fping \
+            -Mroot=src/testing/recverr_driver.zig -Mzig_fping=src/root.zig \
+            -femit-bin=.zig-cache/recverr/recverr-driver >/dev/null 2>&1; then
+            RECVERR_DRIVER="$PWD/.zig-cache/recverr/recverr-driver"
+        else
+            echo "FAIL: could not build the recverr driver" >&2
+            exit 1
+        fi
+    fi
+fi
+export RECVERR_DRIVER
+
 if [ -z "${ZFPING_IN_NS:-}" ]; then
     if unshare -Urn true 2>/dev/null; then
         exec env ZFPING_IN_NS=1 unshare -Urn "$0" "$Z"
@@ -90,6 +110,54 @@ fi
 if tc qdisc add dev lo root netem delay 30ms 2>/dev/null; then
     expect_grep "netem RTT ~60ms"  ", 6[0-9]\." "$Z" -c 1 -t 500 127.0.0.1
     tc qdisc del dev lo root
+fi
+
+# ICMP errors on DGRAM sockets (library option icmp_errors_dgram). A nested
+# "router" namespace (same technique as test/golden.sh) answers probes with
+# real ICMP unreachable errors; the driver must report them from the router
+# address, while the default (option off) reports nothing.
+ROUTER_PID=
+trap '[ -z "$ROUTER_PID" ] || kill "$ROUTER_PID" 2>/dev/null' EXIT
+if [ -z "$RECVERR_DRIVER" ]; then
+    echo "SKIP: icmp_errors_dgram scenarios (no zig to build the driver)"
+else
+    unshare -n sleep 600 &
+    ROUTER_PID=$!
+    sleep 0.3
+    echo "0 0" > /proc/sys/net/ipv4/ping_group_range
+    if ip link add vethA type veth peer name vethB 2>/dev/null &&
+        ip link set vethB netns "$ROUTER_PID" 2>/dev/null &&
+        ip addr add 10.77.0.1/24 dev vethA &&
+        ip -6 addr add fd77::1/64 dev vethA nodad &&
+        ip link set vethA up &&
+        nsenter -t "$ROUTER_PID" -n sh -c '
+            ip link set lo up &&
+            ip addr add 10.77.0.2/24 dev vethB &&
+            ip -6 addr add fd77::2/64 dev vethB nodad &&
+            ip link set vethB up &&
+            sysctl -qw net.ipv4.ip_forward=1 net.ipv6.conf.all.forwarding=1 net.ipv4.icmp_ratelimit=0 net.ipv6.icmp.ratelimit=0 &&
+            ip route add unreachable 10.88.0.0/24 &&
+            ip route add prohibit 10.89.0.0/24 &&
+            ip -6 route add unreachable fd88::/64' 2>/dev/null &&
+        ip route add 10.88.0.0/24 via 10.77.0.2 &&
+        ip route add 10.89.0.0/24 via 10.77.0.2 &&
+        ip -6 route add fd88::/64 via fd77::2; then
+        T="10.88.0.1 10.89.0.1 fd88::1"
+        expect_grep "recverr: v4 unreachable route from router" "^icmp_error 10.88.0.1 type=3 code=1 from=10.77.0.2$" "$RECVERR_DRIVER" $T
+        expect_grep "recverr: v4 prohibited from router"      "^icmp_error 10.89.0.1 type=3 code=13 from=10.77.0.2$" "$RECVERR_DRIVER" $T
+        expect_grep "recverr: v6 unreachable from router"     "^icmp_error fd88::1 type=1 code=0 from=fd77::2$" "$RECVERR_DRIVER" $T
+        expect_grep "recverr: probe still times out (counted)" "^summary 10.88.0.1 sent=1 recv=0 icmp_errors=1$" "$RECVERR_DRIVER" $T
+        out=$("$RECVERR_DRIVER" --off $T 2>&1)
+        if echo "$out" | grep -q '^icmp_error' || ! echo "$out" | grep -q '^summary 10.88.0.1 sent=1 recv=0 icmp_errors=0$'; then
+            echo "FAIL: recverr: option off must report nothing:"
+            echo "$out" | sed 's/^/    /'
+            fails=$((fails+1))
+        else
+            echo "ok: recverr: option off reports nothing"
+        fi
+    else
+        echo "SKIP: icmp_errors_dgram scenarios (cannot create the router namespace)"
+    fi
 fi
 
 if [ "$fails" != 0 ]; then

@@ -206,6 +206,10 @@ fn reportReach(name: []const u8) void {
     resetReach();
 }
 
+/// Set only by the driver's own negative test: a passing test that writes to
+/// stderr is shown by the build runner as a "failed command".
+var quiet_reach = false;
+
 /// Run `harness` over seeds `0..seeds` in-process and fail unless every label
 /// in `required` was reached. Runs in every plain `zig build test`.
 pub fn expectReach(comptime harness: anytype, name: []const u8, seeds: u64, required: []const []const u8) !void {
@@ -222,7 +226,7 @@ pub fn expectReach(comptime harness: anytype, name: []const u8, seeds: u64, requ
     }
     var missing = false;
     for (required) |l| if (reached(l) == 0) {
-        std.debug.print("fuzz harness {s}: label \"{s}\" never reached in {d} seeds\n", .{ name, l, seeds });
+        if (!quiet_reach) std.debug.print("fuzz harness {s}: label \"{s}\" never reached in {d} seeds\n", .{ name, l, seeds });
         missing = true;
     };
     if (missing) return error.HarnessDoesNotReach;
@@ -513,6 +517,8 @@ test "hit and expectReach: a label that is never reached fails" {
         }
     }.f;
     try expectReach(h, "t", 50, &.{ "a", "b" });
+    quiet_reach = true;
+    defer quiet_reach = false;
     try testing.expectError(error.HarnessDoesNotReach, expectReach(h, "t", 50, &.{ "a", "nope" }));
 }
 

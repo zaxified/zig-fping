@@ -80,6 +80,17 @@ pub const Config = struct {
     /// it); embedders running several Pinger instances should pick
     /// `.unique` so instances cannot take each other's replies.
     raw_ident: Socket.RawIdent = .pid,
+    /// Library-only improvement, off by default (fping does not do this):
+    /// report ICMP errors (host/net unreachable, time exceeded, ...) on
+    /// unprivileged DGRAM ("ping") sockets too. The kernel never delivers
+    /// those through the normal receive path, so without this a router's
+    /// "unreachable" looks like plain silence. Enables IP_RECVERR /
+    /// IPV6_RECVERR and drains the socket error queue; errors arrive as
+    /// `Outcome.icmp_error` with `from` set to the node that sent the ICMP
+    /// message, exactly like the RAW path. Counting is unchanged: an ICMP
+    /// error never ends a probe, the timeout still decides. No effect on
+    /// RAW sockets, which see these errors anyway. The CLI never sets it.
+    icmp_errors_dgram: bool = false,
     /// SO_RCVBUF for the ICMP sockets.
     recv_buf_size: u32 = 1 << 20,
     /// IP TTL / IPv6 unicast hops (fping -H).
@@ -445,6 +456,7 @@ pub const Pinger = struct {
             .iface = self.cfg.iface,
             .oiface_index = oiface_index,
             .raw_ident = self.cfg.raw_ident,
+            .recv_errors = self.cfg.icmp_errors_dgram,
         };
         if (need4 and self.sock4 == null) {
             var opts = base;
@@ -574,7 +586,10 @@ pub const Pinger = struct {
     }
 
     /// Fill `buf` with the sockets to poll for readability between step()
-    /// calls (POLLIN; at most one per address family).
+    /// calls (POLLIN; at most one per address family). With
+    /// `Config.icmp_errors_dgram` the kernel also raises POLLERR (always
+    /// reported, never requested) while ICMP errors are queued; any wakeup
+    /// should simply be followed by step(), which drains them.
     pub fn pollFds(self: *const Pinger, buf: *[2]linux.pollfd) []linux.pollfd {
         var n: usize = 0;
         if (self.sock4) |s| {
@@ -845,24 +860,69 @@ pub const Pinger = struct {
 
                 if (self.cfg.mode == .alive) t.done = true else self.checkDone(t);
             },
-            .icmp_error => |e| {
-                if (e.orig_ident != sock.ident) return;
-                const entry = self.seqmap.fetch(e.orig_seq) orelse return;
-                // Informational only; the probe is resolved by its timeout
-                // (fping semantics).
-                self.targets.items[entry.target].stats.icmp_errors += 1;
-                self.emit(entry.target, entry.probe, .{ .icmp_error = .{
-                    .family = fam,
-                    .icmp_type = e.icmp_type,
-                    .code = e.code,
-                    .from = switch (info.src) {
-                        .none => null,
-                        .v4 => |sa| .{ .v4 = sa },
-                        .v6 => |sa| .{ .v6 = sa },
-                    },
-                } });
-            },
+            .icmp_error => |e| self.reportIcmpError(fam, sock, e.orig_ident, e.orig_seq, e.icmp_type, e.code, info.src),
             .ignored => {},
+        }
+    }
+
+    /// Correlate an ICMP error with the probe it quotes (ident against this
+    /// socket's, seq through the seqmap) and report it. Shared by the RAW
+    /// path (error packet in the receive queue) and the DGRAM error queue.
+    fn reportIcmpError(
+        self: *Pinger,
+        fam: icmp.Family,
+        sock: *const Socket,
+        orig_ident: u16,
+        orig_seq: u16,
+        icmp_type: u8,
+        code: u8,
+        from: Socket.RecvInfo.SrcAddr,
+    ) void {
+        if (orig_ident != sock.ident) return;
+        const entry = self.seqmap.fetch(orig_seq) orelse return;
+        // Informational only; the probe is resolved by its timeout
+        // (fping semantics).
+        self.targets.items[entry.target].stats.icmp_errors += 1;
+        self.emit(entry.target, entry.probe, .{ .icmp_error = .{
+            .family = fam,
+            .icmp_type = icmp_type,
+            .code = code,
+            .from = switch (from) {
+                .none => null,
+                .v4 => |sa| .{ .v4 = sa },
+                .v6 => |sa| .{ .v6 = sa },
+            },
+        } });
+    }
+
+    /// Process one socket error queue entry of a DGRAM socket opened with
+    /// `icmp_errors_dgram`. Only ICMP-originated entries of the socket's own
+    /// family are reported; local errors (EMSGSIZE ...) and anything
+    /// malformed are dropped. The returned datagram is our own echo request.
+    fn handleSockErr(self: *Pinger, fam: icmp.Family, sock: *const Socket, info: Socket.ErrInfo) void {
+        const ee = info.ee orelse return;
+        const want_origin: u8 = switch (fam) {
+            .v4 => Socket.ee_origin_icmp,
+            .v6 => Socket.ee_origin_icmp6,
+        };
+        if (ee.origin != want_origin) return;
+        if (info.packet.len < icmp.echo_header_len) return;
+        const ident = std.mem.readInt(u16, info.packet[4..6], .big);
+        const seq = std.mem.readInt(u16, info.packet[6..8], .big);
+        self.reportIcmpError(fam, sock, ident, seq, ee.icmp_type, ee.icmp_code, ee.offender);
+    }
+
+    /// Drain the socket error queue (bounded like the reply drain). Called
+    /// on every drain, not only after POLLERR: poll keeps reporting POLLERR
+    /// while the queue is non-empty, so reading it unconditionally is what
+    /// guarantees the loop cannot spin. Entries are consumed even when they
+    /// do not correlate.
+    fn drainErrQueue(self: *Pinger, fam: icmp.Family, sock: *const Socket, max_batches: u32) void {
+        var n: usize = 0;
+        while (n < @as(usize, Socket.batch_max) * max_batches) : (n += 1) {
+            var buf: [128]u8 = undefined;
+            const info = sock.recvErr(&buf) orelse break;
+            self.handleSockErr(fam, sock, info);
         }
     }
 
@@ -922,6 +982,7 @@ pub const Pinger = struct {
                     // A short batch means the socket is drained.
                     if (infos.len < Socket.batch_max) break;
                 }
+                if (sock.recverr) self.drainErrQueue(fam, sock, max_batches);
             }
         }
     }
@@ -1582,6 +1643,77 @@ test "engine: ICMPv6 error for a live probe is reported" {
     try std.testing.expect(e.from.?.sameHost(try Addr.parse("2001:db8::1")));
     // Wrong ident: not ours.
     p.handleReply(.v6, .{ .packet = errorV6(&buf, 3, 1, 0x4322, seq) }, monoNow());
+    try std.testing.expectEqual(@as(usize, 1), rec.count(.icmp_error));
+}
+
+fn errEntry(packet: []u8, origin: u8, icmp_type: u8, code: u8, offender: Socket.RecvInfo.SrcAddr) Socket.ErrInfo {
+    return .{ .packet = packet, .ee = .{
+        .errno = 113,
+        .origin = origin,
+        .icmp_type = icmp_type,
+        .icmp_code = code,
+        .offender = offender,
+    } };
+}
+
+test "engine: error-queue entry (DGRAM, IP_RECVERR) is reported like a RAW ICMP error" {
+    var rec: Rec = .{};
+    var p = try testPinger(&rec, .{ .icmp_errors_dgram = true });
+    defer testDeinit(&p);
+    const id = try p.addTarget("10.88.0.1");
+    const t0 = monoNow();
+    const seq = try sendProbe(&p, id, 0, t0);
+    var hdr: [icmp.echo_header_len]u8 = undefined;
+    const sock = p.socketFor(.v4);
+
+    p.handleSockErr(.v4, sock, errEntry(echoReply(&hdr, 0x1234, seq), Socket.ee_origin_icmp, 3, 0, srcV4("10.77.0.2")));
+    try std.testing.expectEqual(@as(usize, 1), rec.count(.icmp_error));
+    const e = rec.last_icmp.?;
+    try std.testing.expectEqual(icmp.Family.v4, e.family);
+    try std.testing.expectEqual(@as(u8, 3), e.icmp_type);
+    try std.testing.expectEqual(@as(u8, 0), e.code);
+    try std.testing.expect(e.from.?.sameHost(try Addr.parse("10.77.0.2")));
+    try std.testing.expectEqual(id, rec.ids[0]);
+    try std.testing.expectEqual(@as(u32, 1), p.stats(id).icmp_errors);
+    // The error does not end the probe: still in flight, the timeout decides.
+    try std.testing.expectEqual(@as(u32, 1), p.inflight);
+    try std.testing.expectEqual(@as(u32, 0), p.stats(id).recv);
+
+    // Offender not reported by the kernel: from is null.
+    p.handleSockErr(.v4, sock, errEntry(echoReply(&hdr, 0x1234, seq), Socket.ee_origin_icmp, 11, 0, .none));
+    try std.testing.expectEqual(@as(?Addr, null), rec.last_icmp.?.from);
+    try std.testing.expectEqual(@as(u8, 11), rec.last_icmp.?.icmp_type);
+
+    // Not reported: wrong ident, unknown seq, local origin, v6 origin on a
+    // v4 socket, no RECVERR message, datagram shorter than an echo header.
+    const before = rec.n;
+    p.handleSockErr(.v4, sock, errEntry(echoReply(&hdr, 0x1235, seq), Socket.ee_origin_icmp, 3, 0, .none));
+    p.handleSockErr(.v4, sock, errEntry(echoReply(&hdr, 0x1234, seq +% 1), Socket.ee_origin_icmp, 3, 0, .none));
+    p.handleSockErr(.v4, sock, errEntry(echoReply(&hdr, 0x1234, seq), Socket.ee_origin_local, 3, 0, .none));
+    p.handleSockErr(.v4, sock, errEntry(echoReply(&hdr, 0x1234, seq), Socket.ee_origin_icmp6, 3, 0, .none));
+    p.handleSockErr(.v4, sock, .{ .packet = echoReply(&hdr, 0x1234, seq), .ee = null });
+    p.handleSockErr(.v4, sock, errEntry(hdr[0 .. icmp.echo_header_len - 1], Socket.ee_origin_icmp, 3, 0, .none));
+    try std.testing.expectEqual(before, rec.n);
+    try std.testing.expectEqual(@as(u32, 2), p.stats(id).icmp_errors);
+}
+
+test "engine: IPv6 error-queue entry is reported with the router as source" {
+    var rec: Rec = .{};
+    var p = try testPinger(&rec, .{ .icmp_errors_dgram = true });
+    defer testDeinit(&p);
+    const id = try p.addTarget("fd88::1");
+    const seq = try sendProbe(&p, id, 0, monoNow());
+    var hdr: [icmp.echo_header_len]u8 = undefined;
+    const router: Socket.RecvInfo.SrcAddr = .{ .v6 = (Addr.parse("fd77::2") catch unreachable).v6 };
+    const sock = p.socketFor(.v6);
+
+    p.handleSockErr(.v6, sock, errEntry(echoReply(&hdr, 0x4321, seq), Socket.ee_origin_icmp6, 1, 0, router));
+    const e = rec.last_icmp.?;
+    try std.testing.expectEqual(icmp.Family.v6, e.family);
+    try std.testing.expectEqual(@as(u8, 1), e.icmp_type);
+    try std.testing.expect(e.from.?.sameHost(try Addr.parse("fd77::2")));
+    // A v4-origin entry on the v6 socket is ignored.
+    p.handleSockErr(.v6, sock, errEntry(echoReply(&hdr, 0x4321, seq), Socket.ee_origin_icmp, 1, 0, router));
     try std.testing.expectEqual(@as(usize, 1), rec.count(.icmp_error));
 }
 
