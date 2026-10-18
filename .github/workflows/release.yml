@@ -36,6 +36,14 @@ jobs:
         run: sh scripts/fping-ref.sh
 
       # Same artifacts as a local `scripts/release.sh` run.
+      # Same runner setup as ci.yml: scripts/release.sh runs scripts/test.sh,
+      # whose unit tests run in an unprivileged user+network namespace with
+      # live ICMP sockets.
+      - name: Allow unprivileged ICMP sockets and user namespaces
+        run: |
+          sudo sysctl -w net.ipv4.ping_group_range="0 2147483647"
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0; fi
+
       - name: Build release artifacts
         run: sh scripts/release.sh
 

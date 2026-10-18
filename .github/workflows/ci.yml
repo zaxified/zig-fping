@@ -51,6 +51,12 @@ jobs:
       - name: Allow unprivileged ICMP sockets
         run: sudo sysctl -w net.ipv4.ping_group_range="0 2147483647"
 
+      # Ubuntu 24.04 runners restrict unprivileged user namespaces through
+      # AppArmor; scripts/netns-run (unit tests) and the functional/golden
+      # suites need them to run as a normal user without CAP_NET_RAW.
+      - name: Allow unprivileged user namespaces
+        run: if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0; fi
+
       # Same entry point as local development: scripts/test.sh runs
       # fmt --check, build, unit tests, the namespaced functional suite
       # and the golden-diff comparison against the reference fping.
