@@ -25,7 +25,7 @@ jobs:
       - name: Install Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.16.0
+          version: 0.17.0
 
       # Reference binary for the golden-diff suite (test/golden.sh);
       # ubuntu-latest ships fping 5.1.
@@ -67,7 +67,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: mlugg/setup-zig@v2
         with:
-          version: 0.16.0
+          version: 0.17.0
       # Same as the test job: let the embed-API unit test open its ICMP
       # socket so `zig build test --fuzz` runs all 46 tests, none skipped.
       - name: Allow unprivileged ICMP sockets

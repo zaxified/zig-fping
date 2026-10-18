@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+### Zig 0.17
+
+zig-fping now requires **Zig 0.17.0** (`minimum_zig_version`, `.zigversion`,
+CI). Stay on Zig 0.16 with `v0.1.3`. No behaviour change: the unit,
+functional and golden-diff suites pass unchanged.
+
+- `[_]u8{0} ** 15` → `@splat` (array repetition is gone in 0.17).
+- `@bitCast` of received bytes into `sockaddr.in`/`in6` (now a compile error
+  for extern structs) → `std.mem.bytesToValue`. The `[4]u8` ↔ `u32` in_addr
+  casts also moved to `bytesToValue`/`toBytes`: 0.17 bit-casts arrays as
+  little-endian on every target, so the old casts would have byte-swapped
+  addresses on a big-endian Linux target.
+- `std.mem.indexOfScalar`/`lastIndexOfScalar` → `findScalar`/`findScalarLast`,
+  `std.fmt.allocPrint` → `Allocator.print` (deprecated in 0.17).
+- `build.zig`: `b.args` → `run.addPassthruArgs()`.
+- The vendored skill is now `zig-0.17` (zig-skills `v0.17.0-r1`).
+
 ### Pending upstream (deferred)
 
 To be implemented once the change reaches an upstream release tag

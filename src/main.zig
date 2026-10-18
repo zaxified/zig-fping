@@ -245,9 +245,9 @@ pub fn main(init: std.process.Init) !void {
                 }
             }
             const display: []const u8 = if (opts.by_addr) blk: {
-                const addr_str = try std.fmt.allocPrint(arena, "{f}", .{addr});
+                const addr_str = try arena.print("{f}", .{addr});
                 break :blk if (opts.name_lookup or opts.rdns)
-                    try std.fmt.allocPrint(arena, "{s} ({s})", .{ printname, addr_str })
+                    try arena.print("{s} ({s})", .{ printname, addr_str })
                 else
                     addr_str;
             } else printname;
@@ -357,7 +357,7 @@ fn failInternal(err: *Io.Writer, comptime fmt: []const u8, args: anytype) noretu
 
 fn rdnsAddress(addr: fping.Addr) fping.rdns.Address {
     return switch (addr) {
-        .v4 => |sa| .{ .v4 = @bitCast(sa.addr) },
+        .v4 => |sa| .{ .v4 = std.mem.toBytes(sa.addr) },
         .v6 => |sa| .{ .v6 = sa.addr },
     };
 }

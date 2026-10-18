@@ -1,6 +1,6 @@
 # zig-fping
 
-Zig (0.16+) port of the C project [fping](https://github.com/schweikert/fping),
+Zig (0.17+) port of the C project [fping](https://github.com/schweikert/fping),
 shipped as a reusable Zig library plus the `zfping` CLI.
 Public repository: `github.com/zaxified/zig-fping`.
 
@@ -107,18 +107,20 @@ and has been stable on develop for a few months.
 ## Environment
 
 - **Zig version**: driven by `.zigversion` (read by the VSCode Zig extension)
-  — currently 0.16.0.
-  - binary: `~/.config/Code/User/globalStorage/ziglang.vscode-zig/zig/x86_64-linux-0.16.0/zig`
-    (also exported as `$ZIG` via `.claude/settings.local.json`)
+  — currently 0.17.0.
+  - binary: `.zig-toolchain/zig-0.17.0/zig` (downloaded by `scripts/zig-env.sh`;
+    also exported as `$ZIG` via `.claude/settings.local.json`)
+  - ZLS does not work with Zig 0.17.0 (the configurer/maker build split
+    removed the hook it used) — no editor diagnostics; compile to see errors.
   - NOTE: if `zig version` in PATH does not match `.zigversion` (stale
     session), use the full path / `$ZIG`.
-- **Zig std sources** (authoritative for 0.16 API checks):
-  `~/.config/Code/User/globalStorage/ziglang.vscode-zig/zig/x86_64-linux-0.16.0/lib/std/`
+- **Zig std sources** (authoritative for 0.17 API checks):
+  `.zig-toolchain/zig-0.17.0/lib/std/`
 - **fping C reference**: `/tmp/fping-ref/src/` (shallow clone; restore after
   reboot with `git clone https://github.com/schweikert/fping /tmp/fping-ref`
   — full clone preferred now, the upstream-tracking procedure needs history).
-- The Claude Code `zig` skill documents 0.15.x patterns — always verify 0.16
-  APIs against the std sources above (esp. std.Io, std.posix, std.os.linux).
+- The vendored `zig-0.17` skill (`.claude/skills/zig-0.17`) covers 0.17 —
+  still verify APIs against the std sources above (esp. std.Io, std.os.linux).
 - `codedb` is registered in `.mcp.json` (MCP) and usable as a CLI; it can
   index the Zig std tree too:
   `codedb <std-path> symbol <Name>` / `search` / `outline`.
@@ -128,7 +130,7 @@ and has been stable on develop for a few months.
 ```sh
 scripts/test.sh            # canonical pipeline: fmt + build + unit + functional + golden
 scripts/release.sh         # release artifacts into releases/v<version>/
-scripts/fuzz.sh [secs]     # time-boxed fuzzing (blocked on Zig 0.16.0, see header)
+scripts/fuzz.sh [secs]     # time-boxed fuzzing (LLVM via --release=safe, see header)
 $ZIG build                 # library + zfping CLI
 $ZIG build test            # unit tests
 sh test/functional.sh      # functional suite (isolated user+net namespace)
@@ -149,7 +151,7 @@ Functional tests and ad-hoc runs work without root via namespaces:
 unshare -Urn sh -c 'ip link set lo up; ./zig-out/bin/zfping 127.0.0.1 ::1'
 ```
 
-## Key 0.16 API notes (differ from 0.15.x skill docs)
+## Key Zig 0.16/0.17 API notes
 
 - `std.posix` no longer has socket/sendto/epoll — use `std.os.linux` raw
   syscalls (`linux.errno(rc)` for error checks, not `E.init`).
@@ -165,3 +167,9 @@ unshare -Urn sh -c 'ip link set lo up; ./zig-out/bin/zfping 127.0.0.1 ::1'
   `std.Io.net.HostName.lookup` (A/AAAA/CNAME + /etc/hosts; **no PTR**).
 - PriorityQueue: unmanaged — `.empty` / `initContext`, `push(alloc, e)`,
   `pop()`, `deinit(alloc)`.
+- 0.17: array `**` is gone (`@splat`); `@bitCast` into/out of an extern
+  struct is a compile error and arrays bit-cast as little-endian on every
+  target — reinterpret bytes with `std.mem.bytesToValue(T, bytes)` /
+  `std.mem.toBytes(x)`; `std.mem.find*` replaces `indexOf*`;
+  `allocator.print` replaces `std.fmt.allocPrint`; `run.addPassthruArgs()`
+  replaces `b.args`.

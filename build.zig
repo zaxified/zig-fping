@@ -40,7 +40,7 @@ pub fn build(b: *std.Build) void {
     const run_cmd = b.addRunArtifact(exe);
     run_step.dependOn(&run_cmd.step);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_cmd.addArgs(args);
+    run_cmd.addPassthruArgs();
 
     const mod_tests = b.addTest(.{ .root_module = mod, .use_llvm = use_llvm });
     const run_mod_tests = b.addRunArtifact(mod_tests);

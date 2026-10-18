@@ -37,7 +37,7 @@ fn lookupHostsFile(addr: Address, out: []u8, path: [:0]const u8) ?[]const u8 {
     const content = netutil.readFile(path, &buf) orelse return null;
     var lines = std.mem.tokenizeAny(u8, content, "\r\n");
     while (lines.next()) |line| {
-        const uncommented = line[0 .. std.mem.indexOfScalar(u8, line, '#') orelse line.len];
+        const uncommented = line[0 .. std.mem.findScalar(u8, line, '#') orelse line.len];
         var words = std.mem.tokenizeAny(u8, uncommented, " \t");
         const ip_text = words.next() orelse continue;
         const ip = std.Io.net.IpAddress.parse(ip_text, 0) catch continue;
@@ -174,7 +174,7 @@ fn firstNameserver(path: [:0]const u8) ?Nameserver {
         return switch (ip) {
             .ip4 => |a| .{ .v4 = .{
                 .port = std.mem.nativeToBig(u16, dns_port),
-                .addr = @bitCast(a.bytes),
+                .addr = std.mem.bytesToValue(u32, &a.bytes),
             } },
             .ip6 => |a| .{ .v6 = .{
                 .port = std.mem.nativeToBig(u16, dns_port),

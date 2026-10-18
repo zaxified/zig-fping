@@ -168,7 +168,7 @@ pub const Addr = union(icmp.Family) {
     /// a scope id suffix — numeric ("%2") or an interface name ("%eth0"),
     /// resolved via ioctl(SIOCGIFINDEX) like getaddrinfo does.
     pub fn parse(text: []const u8) ParseError!Addr {
-        if (std.mem.indexOfScalar(u8, text, '%')) |percent| {
+        if (std.mem.findScalar(u8, text, '%')) |percent| {
             const scope_text = text[percent + 1 ..];
             const scope = std.fmt.parseInt(u32, scope_text, 10) catch
                 netutil.ifNameToIndex(scope_text) orelse return error.InvalidAddress;
@@ -188,7 +188,7 @@ pub const Addr = union(icmp.Family) {
         return switch (ip) {
             .ip4 => |a| .{ .v4 = .{
                 .port = 0,
-                .addr = @bitCast(a.bytes),
+                .addr = std.mem.bytesToValue(u32, &a.bytes),
             } },
             .ip6 => |a| .{ .v6 = .{
                 .port = 0,
@@ -235,7 +235,7 @@ pub const Addr = union(icmp.Family) {
     fn subnetKey(self: Addr) u64 {
         switch (self) {
             .v4 => |sa| {
-                const bytes: [4]u8 = @bitCast(sa.addr);
+                const bytes = std.mem.toBytes(sa.addr);
                 const prefix = std.mem.readInt(u32, &bytes, .big) >> 8;
                 return (1 << 32) | @as(u64, prefix);
             },
@@ -248,7 +248,7 @@ pub const Addr = union(icmp.Family) {
     pub fn format(self: Addr, w: *std.Io.Writer) std.Io.Writer.Error!void {
         switch (self) {
             .v4 => |sa| {
-                const b: [4]u8 = @bitCast(sa.addr);
+                const b = std.mem.toBytes(sa.addr);
                 try w.print("{d}.{d}.{d}.{d}", .{ b[0], b[1], b[2], b[3] });
             },
             .v6 => |sa| {
@@ -258,7 +258,7 @@ pub const Addr = union(icmp.Family) {
                 ip6.format(&fixed) catch unreachable;
                 var text = fixed.buffered();
                 // Ip6Address.format renders "[addr]:port"; keep only addr.
-                if (std.mem.lastIndexOfScalar(u8, text, ']')) |close| text = text[0..close];
+                if (std.mem.findScalarLast(u8, text, ']')) |close| text = text[0..close];
                 if (text.len > 0 and text[0] == '[') text = text[1..];
                 try w.writeAll(text);
             },

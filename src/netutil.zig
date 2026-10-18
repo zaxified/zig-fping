@@ -49,7 +49,7 @@ fn policyPrecedence(addr: Addr) u8 {
         .v4 => return 35,
         .v6 => |sa| {
             const b = sa.addr;
-            const loopback = [_]u8{0} ** 15 ++ [_]u8{1};
+            const loopback = @as([15]u8, @splat(0)) ++ [_]u8{1};
             if (std.mem.eql(u8, &b, &loopback)) return 50; // ::1/128
             if (std.mem.allEqual(u8, b[0..10], 0) and b[10] == 0xff and b[11] == 0xff)
                 return 35; // ::ffff:0:0/96 (IPv4-mapped)

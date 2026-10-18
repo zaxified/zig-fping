@@ -16,7 +16,7 @@ jobs:
       - name: Install Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.16.0
+          version: 0.17.0
 
       # Reference binary for the golden-diff suite, same as ci.yml —
       # release.sh runs the full test pipeline before building.

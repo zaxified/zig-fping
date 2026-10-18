@@ -81,7 +81,7 @@ pub const Result = struct {
 const short_with_value = "bBcCfHiIkOpQrStxX";
 
 fn shortTakesValue(c: u8) bool {
-    return std.mem.indexOfScalar(u8, short_with_value, c) != null;
+    return std.mem.findScalar(u8, short_with_value, c) != null;
 }
 
 pub fn parse(gpa: std.mem.Allocator, args: []const []const u8, diag: *Diagnostic) ParseError!Result {
@@ -99,7 +99,7 @@ pub fn parse(gpa: std.mem.Allocator, args: []const []const u8, diag: *Diagnostic
                 break;
             }
             const body = arg[2..];
-            const eq = std.mem.indexOfScalar(u8, body, '=');
+            const eq = std.mem.findScalar(u8, body, '=');
             const name = if (eq) |e| body[0..e] else body;
             const inline_val = if (eq) |e| body[e + 1 ..] else null;
             var consumed_next = false;
@@ -335,7 +335,7 @@ fn parseMs(val: []const u8) ParseError!u64 {
 
 fn parseSquiet(o: *Options, val: []const u8) ParseError!void {
     var spec = val;
-    if (std.mem.indexOfScalar(u8, spec, ',')) |comma| {
+    if (std.mem.findScalar(u8, spec, ',')) |comma| {
         if (!std.mem.eql(u8, spec[comma + 1 ..], "cumulative")) return error.InvalidValue;
         o.cumulative = true;
         spec = spec[0..comma];

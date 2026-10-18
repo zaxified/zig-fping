@@ -1,9 +1,9 @@
 # Zig pitfalls in this repository
 
-Repository-specific lessons for zig-fping on Zig 0.16. General Zig 0.16 API
-changes and gotchas live in the `zig` skill (`.claude/skills/zig`, vendored
-from an audited release — never edit it here); the 0.16 API notes that matter
-most for this code base are in CLAUDE.md.
+Repository-specific lessons for zig-fping on Zig 0.17. General Zig 0.17 API
+changes and gotchas live in the `zig-0.17` skill (`.claude/skills/zig-0.17`,
+vendored from an audited release — never edit it here); the API notes that
+matter most for this code base are in CLAUDE.md.
 
 ## Build modes and backends here
 

@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/zaxified/zig-fping/actions/workflows/ci.yml/badge.svg)](https://github.com/zaxified/zig-fping/actions/workflows/ci.yml)
 
-[fping](https://github.com/schweikert/fping) reimplemented in Zig (0.16+) as a
+[fping](https://github.com/schweikert/fping) reimplemented in Zig (0.17+) as a
 reusable library plus the `zfping` CLI.
 
 > **Note:** This project is a Claude (Fable 5) authored, automated rewrite of
@@ -234,7 +234,7 @@ unshare -Urn sh -c 'ip link set lo up; ./zig-out/bin/zfping 127.0.0.1 ::1'
 ## Development
 
 Everything works from a plain `git clone`, without sudo and without a
-pre-installed Zig — the pinned toolchain (`.zigversion`, 0.16.0) is
+pre-installed Zig — the pinned toolchain (`.zigversion`, 0.17.0) is
 downloaded automatically into `.zig-toolchain/` when missing:
 
 ```sh
@@ -244,7 +244,7 @@ scripts/release.sh   # the above + static binaries for all targets
 scripts/fuzz.sh      # time-boxed fuzzing of the parser fuzz targets
 ```
 
-Or directly with your own Zig 0.16.0:
+Or directly with your own Zig 0.17.0:
 
 ```sh
 zig build -Doptimize=ReleaseSafe       # library + zfping (shipped build mode)
