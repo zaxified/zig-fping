@@ -7,8 +7,20 @@
 set -u
 
 REPO_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-ZIG_VERSION=$(cat "$REPO_ROOT/.zigversion" | tr -d ' \n')
+ZIG_VERSION=$(tr -d ' \n' <"$REPO_ROOT/.zigversion")
 TOOLCHAIN_DIR="$REPO_ROOT/.zig-toolchain"
+
+# SHA256 of the official tarballs (ziglang.org/download/index.json, the
+# "shasum" field), pinned so a download is checked against what was
+# reviewed, not against whatever the server sends with it. Add a line here
+# when .zigversion changes.
+tarball_sha256() {
+    case "$1" in
+        zig-x86_64-linux-0.17.0.tar.xz) echo 1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026 ;;
+        zig-aarch64-linux-0.17.0.tar.xz) echo 9e8d11661d4ae3bd57702a3832781e23ad151dde5798e16a5ccd503f65234ff8 ;;
+        *) return 1 ;;
+    esac
+}
 
 zig_version_ok() {
     [ -x "$1" ] && [ "$("$1" version 2>/dev/null)" = "$ZIG_VERSION" ]
@@ -36,6 +48,10 @@ resolve_zig() {
         *) echo "zig-env: unsupported architecture: $arch" >&2; return 1 ;;
     esac
     tarball="zig-$arch-linux-$ZIG_VERSION.tar.xz"
+    sha256=$(tarball_sha256 "$tarball") || {
+        echo "zig-env: no pinned SHA256 for $tarball (add it to tarball_sha256 in scripts/zig-env.sh)" >&2
+        return 1
+    }
     url="https://ziglang.org/download/$ZIG_VERSION/$tarball"
     echo "zig-env: downloading $url" >&2
     mkdir -p "$TOOLCHAIN_DIR"
@@ -47,6 +63,11 @@ resolve_zig() {
         echo "zig-env: need curl or wget to download Zig" >&2
         return 1
     fi
+    echo "$sha256  $TOOLCHAIN_DIR/$tarball" | sha256sum -c - >/dev/null 2>&1 || {
+        echo "zig-env: SHA256 mismatch for $tarball, not using it" >&2
+        rm -f "$TOOLCHAIN_DIR/$tarball"
+        return 1
+    }
     tar -C "$TOOLCHAIN_DIR" -xJf "$TOOLCHAIN_DIR/$tarball" || return 1
     rm -f "$TOOLCHAIN_DIR/$tarball"
     mv "$TOOLCHAIN_DIR/zig-$arch-linux-$ZIG_VERSION" "$TOOLCHAIN_DIR/zig-$ZIG_VERSION"

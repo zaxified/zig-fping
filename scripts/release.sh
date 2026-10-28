@@ -22,6 +22,18 @@ VERSION=$(sed -n 's/^ *\.version = "\(.*\)",$/\1/p' build.zig.zon)
 [ -n "$VERSION" ] || { echo "release: cannot read version from build.zig.zon" >&2; exit 1; }
 OUT="$REPO_ROOT/releases/v$VERSION"
 
+# The version lives in three places; `zfping -v` and the man page must not
+# disagree with the package.
+grep -q "\"zfping $VERSION (" src/main.zig ||
+    { echo "release: src/main.zig version_string is not $VERSION" >&2; exit 1; }
+grep -q "^\.TH ZFPING 8 .* \"zfping $VERSION\"" doc/zfping.8 ||
+    { echo "release: doc/zfping.8 .TH line is not $VERSION" >&2; exit 1; }
+# In the release workflow the tag must name this version too.
+if [ -n "${GITHUB_REF_NAME:-}" ] && [ "$GITHUB_REF_NAME" != "v$VERSION" ]; then
+    echo "release: tag $GITHUB_REF_NAME does not match build.zig.zon version $VERSION" >&2
+    exit 1
+fi
+
 echo "==> building v$VERSION into $OUT"
 rm -rf "$OUT"
 mkdir -p "$OUT"

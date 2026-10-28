@@ -84,9 +84,13 @@ else
         if [ -n "$SYS_FPING" ]; then
             sh test/golden.sh "$ZFPING_BIN" "$SYS_FPING"
         fi
-    else
+    elif [ -n "$SYS_FPING" ]; then
         echo "warning: fping 5.5 reference unavailable, using the system fping" >&2
         sh test/golden.sh "$ZFPING_BIN" "$SYS_FPING"
+    else
+        # golden.sh itself skips (exit 0) without a reference; the gate must not.
+        echo "error: no reference fping (fping 5.5 could not be built, none installed)" >&2
+        exit 1
     fi
 fi
 

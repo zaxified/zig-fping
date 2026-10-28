@@ -49,8 +49,8 @@ it was ported from:
   in production.
 - **No autotools.** `build.zig` replaces configure.ac/Makefile.am, and
   cross-compiling is just a target flag: `zig build -Dtarget=aarch64-linux
-  -Doptimize=ReleaseSafe` (CI builds aarch64, riscv64 and musl variants on
-  every push).
+  -Doptimize=ReleaseSafe` (CI cross-compiles to aarch64, riscv64, x86, arm
+  and riscv32 on every push, and runs the unit tests as 32-bit x86).
 - **One static binary, package-manager distribution.** No libc at all;
   consumers add the library with `zig fetch`.
 - **Better algorithmic scaling.** Priority queues (O(log n)) replace
@@ -79,7 +79,7 @@ intentionally one packet per gap, keeping net-storm protection intact.
 
 ### Binary size
 
-The released `zfping` is ~470 KB versus fping's ~52 KB — but fping is
+The released `zfping` is ~530 KB versus fping's ~52 KB — but fping is
 dynamically linked against glibc (~2.2 MB shared), while zfping is fully
 static with zero runtime dependencies. By symbol breakdown, the port's own
 code is ~60 KB (on par with fping); the rest is the statically linked
@@ -92,7 +92,7 @@ the code paths that parse untrusted network bytes (ICMP and DNS replies),
 which is part of this port's value over the C original. The checks cost
 ~55 KB of the binary and no measurable speed (the benchmark above runs
 with them on). For embedded targets with tight flash budgets,
-`zig build -Doptimize=ReleaseSmall -Dstrip=true` produces a ~248 KB
+`zig build -Doptimize=ReleaseSmall -Dstrip=true` produces a ~270 KB
 binary — at the price of disabling those safety checks, so prefer
 ReleaseSafe wherever size is not critical.
 
@@ -120,8 +120,8 @@ cycle of 10k checks per 5 minutes uses well under 1% of that.
 zig fetch --save git+https://github.com/zaxified/zig-fping
 ```
 
-`main` follows the current Zig release; **v0.2.0** is the latest release
-(Zig 0.17, `#v0.2.0` pins it). **v0.1.3 is the last release for
+`main` follows the current Zig release; **v0.2.1** is the latest release
+(Zig 0.17, `#v0.2.1` pins it). **v0.1.3 is the last release for
 Zig 0.16** — pin it if your project stays on 0.16
 (`zig fetch --save git+https://github.com/zaxified/zig-fping#v0.1.3`).
 
@@ -206,6 +206,9 @@ monitor built on the library: a daemon that pings a handful of targets every
 minute and serves a web page with 24 hours of status, latency and loss, with
 pause and Nagios-style acknowledgements, and a `--read-only` mode for public
 demos. It is its own package and shows how a consumer depends on `zig_fping`.
+Every release carries it as a Debian package (`fping-watch_<version>_amd64.deb`,
+`_arm64.deb`): writable on `127.0.0.1:8080` once installed, read-only with
+one setting for a public demo ([Deploying](example-apps/fping-watch#deploying)).
 
 <a href="example-apps/fping-watch"><img src="example-apps/fping-watch/doc/screenshot.png" width="480" alt="fping-watch web page: targets with status, recent cycles, uptime and a latency chart"></a>
 
@@ -220,10 +223,11 @@ anywhere) are published on the
 [Releases page](https://github.com/zaxified/zig-fping/releases):
 
 ```sh
-# adjust the version to the latest release tag
-curl -fsSL -o zfping.tar.gz \
-  https://github.com/zaxified/zig-fping/releases/download/v0.1.3/zfping-v0.1.3-x86_64-linux.tar.gz
-tar xzf zfping.tar.gz && ./zfping --help
+v=0.2.1   # the latest release tag
+base=https://github.com/zaxified/zig-fping/releases/download/v$v
+curl -fsSLO "$base/zfping-v$v-x86_64-linux.tar.gz" -O "$base/SHA256SUMS"
+sha256sum -c --ignore-missing SHA256SUMS
+tar xzf "zfping-v$v-x86_64-linux.tar.gz" && ./zfping --help
 ```
 
 Or build from source:
@@ -248,8 +252,12 @@ The library tries an unprivileged `SOCK_DGRAM` ICMP socket first, then falls
 back to `SOCK_RAW`:
 
 ```sh
-# unprivileged ping (recommended for monitoring daemons):
-sudo sysctl -w net.ipv4.ping_group_range="0 2147483647"
+# unprivileged ping (recommended for monitoring daemons); systemd's defaults
+# (/usr/lib/sysctl.d/50-default.conf) already allow every group, check with:
+sysctl net.ipv4.ping_group_range
+# where they do not, allow it persistently:
+echo 'net.ipv4.ping_group_range = 0 2147483647' | sudo tee /etc/sysctl.d/60-ping.conf
+sudo sysctl --system
 # or grant the binary the raw-socket capability:
 sudo setcap cap_net_raw+ep zfping
 ```
@@ -264,14 +272,16 @@ unshare -Urn sh -c 'ip link set lo up; ./zig-out/bin/zfping 127.0.0.1 ::1'
 
 Everything works from a plain `git clone`, without sudo and without a
 pre-installed Zig — the pinned toolchain (`.zigversion`, 0.17.0) is
-downloaded automatically into `.zig-toolchain/` when missing:
+downloaded automatically into `.zig-toolchain/` when missing, and checked
+against the SHA256 pinned in `scripts/zig-env.sh`:
 
 ```sh
 scripts/test.sh      # fmt check + build + unit + functional + golden-diff
                      #   (unit tests run in a double user namespace via scripts/netns-run,
                      #   and fail on any unexpected skipped test)
-scripts/release.sh   # the above + static binaries for all targets
-                     #   into releases/v<version>/ (tar.gz + SHA256SUMS)
+scripts/release.sh   # the above + static binaries for all targets and the
+                     #   fping-watch .deb packages into releases/v<version>/
+                     #   (tar.gz, .deb, SHA256SUMS)
 scripts/fuzz.sh      # deterministic-seed fuzzing of the parser/option/target harnesses
 ```
 

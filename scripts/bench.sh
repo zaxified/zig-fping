@@ -28,6 +28,8 @@ ip link set lo up
 ip route add 192.0.2.0/24 dev lo   # silent (blackhole-like) test subnet
 
 Z=./zig-out/bin/zfping
+TIMEF=$(mktemp)
+trap 'rm -f "$TIMEF"' EXIT
 F=$(command -v fping || true)
 
 RESPONDING="-g 127.0.1.0 127.0.8.207"   # 2000 loopback addresses
@@ -39,9 +41,9 @@ SILENT="-g 192.0.2.1 192.0.2.250"       # 250 never-answering addresses
 measure() {
     bin="$1"; shift
     if [ -x /usr/bin/time ]; then
-        /usr/bin/time -o /tmp/bench.time -f '%e s, %P CPU' \
+        /usr/bin/time -o "$TIMEF" -f '%e s, %P CPU' \
             "$bin" "$@" >/dev/null 2>/dev/null || true
-        tail -1 /tmp/bench.time
+        tail -1 "$TIMEF"
     else
         s=$(date +%s%N)
         "$bin" "$@" >/dev/null 2>&1 || true
