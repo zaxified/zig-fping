@@ -13,6 +13,7 @@
 const std = @import("std");
 const Io = std.Io;
 const fping = @import("zig_fping");
+const demo = @import("demo.zig");
 
 const log = std.log.scoped(.monitor);
 
@@ -60,6 +61,8 @@ pub const Target = struct {
     ok_streak: u8 = 0,
     /// Why the last cycle could not probe (static string), if it could not.
     last_error: ?[]const u8 = null,
+    /// Sample-data scenario for `Monitor.demo`.
+    scenario: ?demo.Scenario = null,
     last: Sample = .{},
     /// Ring buffer indexed by cycle number, see `slot()`.
     history: [history_len]Sample = @splat(.{}),
@@ -73,7 +76,7 @@ pub const Target = struct {
     }
 };
 
-pub const Error = error{ InvalidName, InvalidHost, TooManyTargets, UnknownTarget, NotDown };
+pub const Error = error{ InvalidName, InvalidHost, InvalidScenario, TooManyTargets, UnknownTarget, NotDown };
 
 /// Identifies one version of the web state; the HTTP layer turns it into
 /// an ETag, so a viewer polling between cycles gets `304 Not Modified`.
@@ -99,6 +102,15 @@ pub const Monitor = struct {
     /// history in memory only.
     history_path: ?[]const u8 = null,
     read_only: bool = false,
+    /// Public demo: every full hour, history older than the last hour of
+    /// real probing is replaced with sample data (see demo.zig).
+    demo: bool = false,
+    /// Start (unix s) of the real data; older samples are sample data. 0 until
+    /// the first fill.
+    demo_from: i64 = 0,
+    /// The first cycle of this run, and the hour of the last fill.
+    demo_since: i64 = 0,
+    demo_hour: i64 = 0,
     /// Bumped on every change the web page would show; with the cycle start
     /// it identifies one `stateJson` result (see `StateTag`).
     version: u64 = 0,
@@ -266,6 +278,7 @@ pub const Monitor = struct {
             const i = m.find(job.id) orelse continue;
             m.recordLocked(m.targets.items[i], t, job);
         }
+        if (m.demo) m.demoFillLocked(t);
         m.version += 1;
         m.saveHistoryLocked();
     }
@@ -275,13 +288,7 @@ pub const Monitor = struct {
         var sample: Sample = .{ .t = t, .sent = probes_per_cycle };
         if (job.err == null) {
             sample.sent = job.sent;
-            sample.recv = job.replies;
-            if (job.replies > 0) {
-                const r = job.rtts[0..job.replies];
-                sample.jitter_us = jitter(r);
-                std.mem.sortUnstable(u32, r, {}, std.sort.asc(u32));
-                sample.rtt_us = r[r.len / 2];
-            }
+            summarize(&sample, job.rtts[0..job.replies]);
         }
         target.last_error = job.err;
         target.last = sample;
@@ -301,6 +308,44 @@ pub const Monitor = struct {
         }
     }
 
+    /// Once per hour (and after the first cycle of a run): everything older
+    /// than the last hour of real data, or than this run, becomes sample data.
+    fn demoFillLocked(m: *Monitor, t: i64) void {
+        if (m.demo_since == 0) m.demo_since = t;
+        const hour = t - @mod(t, 3600);
+        if (hour == m.demo_hour) return;
+        m.demo_hour = hour;
+        const live_from = @max(hour - 3600, m.demo_since);
+        m.demo_from = live_from;
+        for (m.targets.items) |target| {
+            const scenario = target.scenario orelse continue;
+            // The sample past is scaled to the target's real median latency.
+            var real: [history_len]u32 = undefined;
+            var n: usize = 0;
+            var at = live_from;
+            while (at <= t) : (at += m.cycle_s) {
+                const s = target.history[m.slot(at)];
+                if (s.t == at and s.recv > 0) {
+                    real[n] = s.rtt_us;
+                    n += 1;
+                }
+            }
+            std.mem.sortUnstable(u32, real[0..n], {}, std.sort.asc(u32));
+            const base_ms: f64 = if (n > 0) @as(f64, @floatFromInt(real[n / 2])) / 1000 else 20;
+
+            var k: i64 = 1;
+            while (k < history_len) : (k += 1) {
+                const when = t - k * m.cycle_s;
+                if (when >= live_from) continue;
+                var rtts: [probes_per_cycle]u32 = undefined;
+                const replies = demo.probes(scenario, target.id, when, base_ms, live_from, &rtts);
+                var sample: Sample = .{ .t = when, .sent = probes_per_cycle };
+                summarize(&sample, rtts[0..replies]);
+                target.history[m.slot(when)] = sample;
+            }
+        }
+    }
+
     // ----- persistence ----------------------------------------------------------
 
     /// The on-disk target list. Hand-written files may omit everything but
@@ -312,6 +357,8 @@ pub const Monitor = struct {
             host: []const u8,
             paused: bool = false,
             acked: bool = false,
+            /// A `demo.Scenario` name, used with `--demo`.
+            demo: ?[]const u8 = null,
         },
     };
 
@@ -335,6 +382,7 @@ pub const Monitor = struct {
             const t = m.targets.items[m.targets.items.len - 1];
             t.paused = entry.paused;
             t.acked = entry.acked;
+            if (entry.demo) |name| t.scenario = std.meta.stringToEnum(demo.Scenario, name) orelse return error.InvalidScenario;
         }
     }
 
@@ -345,9 +393,11 @@ pub const Monitor = struct {
         const w = &aw.writer;
         w.writeAll("{\n  \"targets\": [") catch return;
         for (m.targets.items, 0..) |t, i| {
-            w.print("{s}\n    {{ \"id\": {d}, \"name\": {f}, \"host\": {f}, \"paused\": {}, \"acked\": {} }}", .{
+            w.print("{s}\n    {{ \"id\": {d}, \"name\": {f}, \"host\": {f}, \"paused\": {}, \"acked\": {}", .{
                 if (i == 0) "" else ",", t.id, std.json.fmt(t.name, .{}), std.json.fmt(t.host, .{}), t.paused, t.acked,
             }) catch return;
+            if (t.scenario) |sc| w.print(", \"demo\": \"{t}\"", .{sc}) catch return;
+            w.writeAll(" }") catch return;
         }
         w.writeAll("\n  ]\n}\n") catch return;
         writeFileAtomic(m.io, m.config_path, aw.written()) catch |err|
@@ -466,8 +516,8 @@ pub const Monitor = struct {
     /// `null` where there is no sample.
     fn writeStateLocked(m: *Monitor, w: *Io.Writer, newest: i64) Io.Writer.Error!void {
         try w.print(
-            "{{\"read_only\":{},\"cycle_s\":{d},\"probes\":{d},\"ack_clear_after\":{d},\"end\":{d},\"targets\":[",
-            .{ m.read_only, m.cycle_s, probes_per_cycle, ack_clear_after, newest },
+            "{{\"read_only\":{},\"demo_from\":{d},\"cycle_s\":{d},\"probes\":{d},\"ack_clear_after\":{d},\"end\":{d},\"targets\":[",
+            .{ m.read_only, m.demo_from, m.cycle_s, probes_per_cycle, ack_clear_after, newest },
         );
         for (m.targets.items, 0..) |t, i| {
             try w.print(
@@ -509,6 +559,16 @@ pub const Monitor = struct {
 };
 
 // ----- helpers ------------------------------------------------------------------
+
+/// Fills `sample.recv`, `rtt_us` (median) and `jitter_us` from the replies'
+/// round-trip times, given in reply order (sorted here).
+fn summarize(sample: *Sample, rtts: []u32) void {
+    sample.recv = @intCast(rtts.len);
+    if (rtts.len == 0) return;
+    sample.jitter_us = jitter(rtts);
+    std.mem.sortUnstable(u32, rtts, {}, std.sort.asc(u32));
+    sample.rtt_us = rtts[rtts.len / 2];
+}
 
 /// Mean absolute difference between consecutive round-trip times, in reply
 /// order (the usual "jitter" of ping tools); 0 with fewer than two.
@@ -776,6 +836,35 @@ test "jitter is the mean step between consecutive replies" {
     try testing.expectEqual(0, jitter(&.{1000}));
     try testing.expectEqual(0, jitter(&.{ 500, 500, 500 }));
     try testing.expectEqual(1500, jitter(&.{ 1000, 3000, 2000 })); // (2000 + 1000) / 2
+}
+
+test "demo: sample data before the real hour, real data kept" {
+    var m = testMonitor();
+    defer m.deinit();
+    m.demo = true;
+    const id = try m.add("a", "192.0.2.1");
+    const t = m.targets.items[0];
+    t.scenario = .outage;
+    const hour: i64 = 1_700_006_400;
+    // First run: everything before the first cycle becomes sample data.
+    fakeCycle(&m, id, hour + 600, 5); // real: median 3 ms
+    m.demoFillLocked(hour + 600);
+    try testing.expectEqual(hour + 600, m.demo_from);
+    try testing.expectEqual(hour + 540, t.history[m.slot(hour + 540)].t);
+    try testing.expectEqual(hour + 600 - (history_len - 1) * 60, t.history[m.slot(hour + 660)].t);
+    // The outage 3-3.75 h before the real data is in it, scaled to the real 3 ms.
+    try testing.expectEqual(0, t.history[m.slot(hour + 600 - 3 * 3600 - 600)].recv);
+    const calm = t.history[m.slot(hour + 600 - 3600)];
+    try testing.expect(calm.recv > 0 and calm.rtt_us >= 3000 and calm.rtt_us < 10_000);
+    // Later fills keep the last full hour of real data, and this run's.
+    for (11..70) |i| fakeCycle(&m, id, hour + 60 * @as(i64, @intCast(i)), 4);
+    m.demoFillLocked(hour + 3600 + 540);
+    try testing.expectEqual(hour + 600, m.demo_from); // max(hour, first cycle)
+    try testing.expectEqual(4, t.history[m.slot(hour + 660)].recv); // real
+    for (70..2 * 60 + 10) |i| fakeCycle(&m, id, hour + 60 * @as(i64, @intCast(i)), 4);
+    m.demoFillLocked(hour + 2 * 3600 + 540);
+    try testing.expectEqual(hour + 3600, m.demo_from);
+    try testing.expectEqual(4, t.history[m.slot(hour + 3600)].recv); // real
 }
 
 test "names and hosts are validated" {

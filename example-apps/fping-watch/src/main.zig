@@ -3,7 +3,8 @@
 //! Pings a handful of targets once a minute and serves a web page with the
 //! last 24 hours: status, latency and packet loss per target, plus buttons to
 //! add, remove, pause and acknowledge targets. `--read-only` turns the page
-//! into a public demo: the server refuses every change, not just the page.
+//! into a public demo: the server refuses every change, not just the page;
+//! `--demo` also fills the history older than an hour with sample data.
 
 const std = @import("std");
 const Io = std.Io;
@@ -20,6 +21,7 @@ const usage =
     \\  --targets FILE       target list, JSON (default targets.json)
     \\  --history FILE       keep the 24 h history across restarts (default: memory only)
     \\  --read-only          public demo: refuse every change
+    \\  --demo               --read-only, plus sample data older than the last hour (see README)
     \\  --allow-host NAME    also answer to this host name (repeatable); see README
     \\  --cycle SECONDS      seconds between probing cycles (default 60)
     \\  --version            print the version and exit
@@ -42,6 +44,11 @@ pub fn main(init: std.process.Init) !void {
         const arg = args[i];
         if (std.mem.eql(u8, arg, "--read-only")) {
             monitor.read_only = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--demo")) {
+            monitor.read_only = true;
+            monitor.demo = true;
             continue;
         }
         if (std.mem.eql(u8, arg, "--version")) {
@@ -75,7 +82,7 @@ pub fn main(init: std.process.Init) !void {
         fatal(io, "cannot listen on {s}: {t}", .{ listen_text, err });
     defer server.deinit(io);
     log.info("fping-watch {s} listening on http://{s} ({d} targets{s})", .{
-        version, listen_text, monitor.targets.items.len, if (monitor.read_only) ", read-only" else "",
+        version, listen_text, monitor.targets.items.len, if (monitor.demo) ", demo" else if (monitor.read_only) ", read-only" else "",
     });
 
     // The probing loop, the reaper and every connection run concurrently;
@@ -278,8 +285,8 @@ fn route(monitor: *Monitor, req: *http.Server.Request, arena: std.mem.Allocator)
         if (std.mem.eql(u8, path, "/healthz")) {
             const h = monitor.health(Io.Clock.real.now(monitor.io).toSeconds());
             return send(req, if (h.ok) .ok else .service_unavailable, "application/json", try arena.print(
-                "{{\"ok\":{},\"probing_ok\":{},\"last_cycle\":{d},\"read_only\":{},\"version\":\"{s}\"}}",
-                .{ h.ok, h.probing_ok, h.last_cycle, monitor.read_only, version },
+                "{{\"ok\":{},\"probing_ok\":{},\"last_cycle\":{d},\"read_only\":{},\"demo\":{},\"version\":\"{s}\"}}",
+                .{ h.ok, h.probing_ok, h.last_cycle, monitor.read_only, monitor.demo, version },
             ));
         }
         return sendError(req, .not_found, "not found");
@@ -419,4 +426,5 @@ fn sendMonitorError(req: *http.Server.Request, err: anyerror) !void {
 
 test {
     _ = @import("monitor.zig");
+    _ = @import("demo.zig");
 }

@@ -16,7 +16,11 @@ handful of targets once a minute and serves a web page with the last 24 hours.
   Nagios does: it shows ACK instead of DOWN until 5 cycles in a row are not DOWN
   again, so the next outage is reported;
 - `--read-only` for a public demo: the server refuses every change (HTTP 403);
-  the page still shows every control, and using one says it is a demo.
+  the page still shows every control, and using one says it is a demo; every
+  control explains itself on hover;
+- `--demo` (read-only too) fills the 24 hours with sample data that shows
+  what problems look like ([Sample data](#sample-data-for-a-demo)); the last
+  hour stays real.
 
 Writable is the default: you run it for yourself, on loopback. The public
 demo is the same package with one setting changed ([Deploying](#deploying)).
@@ -46,6 +50,7 @@ zig build                     # ReleaseSafe by default
 | `--targets FILE` | `targets.json` | target list; rewritten on every change; a writable instance without it starts empty |
 | `--history FILE` | (memory only) | the 24-hour history, saved after every cycle; an unreadable one is moved to `FILE.bad` |
 | `--read-only` | off | refuse every change |
+| `--demo` | off | `--read-only`, and history older than the last hour is sample data, see [below](#sample-data-for-a-demo) |
 | `--allow-host NAME` | | a writable instance also answers to this host name (repeatable), see below |
 | `--cycle SECONDS` | `60` | seconds between cycles (the tests use 5) |
 | `--version` | | print the version and exit |
@@ -92,7 +97,7 @@ not the expected one is shown as "no data".
 | `DELETE /api/targets/ID` | remove |
 | `POST /api/targets/ID/pause`, `/resume` | stop and resume probing |
 | `POST /api/targets/ID/ack`, `/unack` | acknowledge a DOWN target, or withdraw the acknowledgement |
-| `GET /healthz` | `200 {"ok":true,...}` while cycles keep finishing (at most 3 cycles apart) and the ICMP socket opens; `503` otherwise. Unreachable targets do not count: they are what is being monitored |
+| `GET /healthz` | `200 {"ok":true,"read_only":...,"demo":...}` while cycles keep finishing (at most 3 cycles apart) and the ICMP socket opens; `503` otherwise. Unreachable targets do not count: they are what is being monitored |
 
 Changes must be sent as `application/json`: a cross-site HTML form cannot do
 that without a CORS preflight, which the server never approves, so a page on
@@ -232,7 +237,7 @@ runs writable; the health check then insists on read-only.
     content: |
       FPING_WATCH_LISTEN=127.0.0.1:8080
       FPING_WATCH_TARGETS=/etc/fping-watch/targets.json
-      FPING_WATCH_OPTS=--read-only
+      FPING_WATCH_OPTS=--demo
   notify: restart fping-watch
 - name: fping-watch targets
   ansible.builtin.copy: { src: targets.json, dest: /etc/fping-watch/targets.json, mode: "0644" }
@@ -267,6 +272,36 @@ Caddy has no per-client rate limits without a plugin; on the open internet
 let the host's protection (CrowdSec, fail2ban) watch the proxy's log. The
 sample list pings IPv6 addresses too: on a host without IPv6 they stay DOWN,
 so leave them out there.
+
+### Sample data for a demo
+
+A new demo has no history, and a healthy network has nothing to show. With
+`--demo`, after the first cycle and then at every full hour, everything older
+than the last full hour of real probing (or than the start of the daemon,
+whichever is later) is replaced with sample data; the page shades it and
+marks it "sample data", tooltips included. Only targets with a `"demo"`
+scenario get it:
+
+```json
+{ "id": 1, "name": "Cloudflare DNS", "host": "1.1.1.1", "demo": "evening_congestion" }
+```
+
+| scenario | what it shows |
+|---|---|
+| `steady` | nothing: small noise, a rare spike |
+| `evening_congestion` | a congested uplink 18-22 UTC: latency and jitter climb, a little loss |
+| `route_change` | a latency plateau for three hours, 18 to 15 hours ago |
+| `flapping` | bursts of partial loss all day, an 8-minute outage 6 hours ago |
+| `outage` | 20 minutes of rising latency, jitter and loss, then 45 minutes DOWN, recovered 3 hours ago |
+| `bufferbloat` | a nightly backup 01:00-02:30 UTC: a sawtooth of queueing delay |
+| `long_haul` | a distant host: more jitter, busier 10-14 UTC |
+
+The sample data is scaled to the target's real median latency, so it joins
+the live hour, and is drawn from the target and the minute: the same minute
+looks the same after the next refill. Live probing stays real, so choose
+targets that answer. The package ships a list of public IPv4 and IPv6
+targets with one scenario each, `/usr/share/fping-watch/demo-targets.json`
+(`FPING_WATCH_TARGETS` can point at it directly).
 
 ## About page
 

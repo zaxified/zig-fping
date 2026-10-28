@@ -43,11 +43,13 @@ const percentile = (a, p) => {
   const sorted = [...a].sort((x, y) => x - y);
   return sorted[Math.min(sorted.length - 1, Math.ceil((p / 100) * sorted.length) - 1)];
 };
-// One cycle, for the beat strip and the chart tooltip.
+// One cycle, for the beat strip and the chart tooltip. A demo marks the
+// sample data (everything before demo_from).
 const describe = (t, i, at) =>
-  t.loss[i] === null
+  (at < state.demo_from ? "sample data · " : "") +
+  (t.loss[i] === null
     ? `${time(at)} · no data`
-    : `${time(at)} · ${ms(t.rtt[i])}` + (t.jitter[i] === null ? "" : ` ± ${ms(t.jitter[i])}`) + ` · ${t.loss[i]} % loss`;
+    : `${time(at)} · ${ms(t.rtt[i])}` + (t.jitter[i] === null ? "" : ` ± ${ms(t.jitter[i])}`) + ` · ${t.loss[i]} % loss`);
 const time = (unix) => new Date(unix * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
 function summarize(t) {
@@ -206,9 +208,10 @@ function renderDetail(detail, t, s) {
   const actions = $(".actions", detail);
   actions.replaceChildren();
   const note = el("span", "note");
-  const action = (text, fn, cls) => {
+  const action = (text, hint, fn, cls) => {
     const b = el("button", cls, text);
     b.type = "button";
+    b.title = hint;
     b.addEventListener("click", async () => {
       b.disabled = true;
       note.textContent = "";
@@ -217,11 +220,13 @@ function renderDetail(detail, t, s) {
     actions.append(b);
   };
   const base = `api/targets/${t.id}`;
-  if (t.paused) action("Resume", () => call("POST", `${base}/resume`));
-  else action("Pause", () => call("POST", `${base}/pause`));
-  if (t.status === "down" && !t.acked) action("Acknowledge", () => call("POST", `${base}/ack`));
-  if (t.acked) action("Remove acknowledgement", () => call("POST", `${base}/unack`));
-  action("Remove", () => (state.read_only || confirm(`Remove ${t.name}?`)) && call("DELETE", base).then(() => open.delete(t.id)), "danger");
+  if (t.paused) action("Resume", "Start probing this target again", () => call("POST", `${base}/resume`));
+  else action("Pause", "Stop probing this target, e.g. during maintenance; the history is kept", () => call("POST", `${base}/pause`));
+  if (t.status === "down" && !t.acked)
+    action("Acknowledge", `Mark this outage as known: the target shows ACK instead of DOWN until ${state.ack_clear_after} cycles in a row are not DOWN`, () => call("POST", `${base}/ack`));
+  if (t.acked) action("Remove acknowledgement", "Show this target as DOWN again", () => call("POST", `${base}/unack`));
+  action("Remove", "Stop monitoring this target and delete its history",
+    () => (state.read_only || confirm(`Remove ${t.name}?`)) && call("DELETE", base).then(() => open.delete(t.id)), "danger");
   actions.append(note);
 }
 
@@ -240,6 +245,19 @@ function renderChart(box, t) {
     const label = svgEl("text", { class: "axis", x: L - 6, y: y(top * f) + 4, "text-anchor": "end" });
     label.textContent = f === 0 ? "0" : `${+(top * f).toFixed(1)} ms`;
     svg.append(label);
+  }
+  // A demo: shade the sample data, so nobody takes it for a real record.
+  const real = n - 1 - (state.end - state.demo_from) / state.cycle_s;
+  if (state.demo_from > 0 && real > 0) {
+    svg.append(svgEl("rect", { class: "sample", x: L, y: T, width: Math.min(x(real), W - R) - L, height: H - T - B }));
+    const label = svgEl("text", { class: "axis", x: L + 6, y: T + 12 });
+    label.textContent = "sample data";
+    svg.append(label);
+    if (x(real) + 34 < W - R) { // the live part is narrow in the first minutes
+      const live = svgEl("text", { class: "axis", x: x(real) + 6, y: T + 12 });
+      live.textContent = "live";
+      svg.append(live);
+    }
   }
   const perHour = 3600 / state.cycle_s;
   for (let i = n - 1; i >= 0; i -= 6 * perHour) {

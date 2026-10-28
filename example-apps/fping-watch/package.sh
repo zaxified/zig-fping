@@ -43,6 +43,7 @@ for pair in x86_64-linux:amd64 aarch64-linux:arm64; do
 
     install -D -m 0644 deploy/fping-watch.service "$stage/usr/lib/systemd/system/fping-watch.service"
     install -D -m 0644 targets.json "$stage/usr/share/fping-watch/targets.json"
+    install -D -m 0644 deploy/demo-targets.json "$stage/usr/share/fping-watch/demo-targets.json"
     install -D -m 0644 deploy/Caddyfile "$stage/usr/share/fping-watch/Caddyfile"
     # The about page for a demo hub: /usr/share/fping-watch/about/.
     "$ZIG" build about --prefix "$stage/usr/share/fping-watch"

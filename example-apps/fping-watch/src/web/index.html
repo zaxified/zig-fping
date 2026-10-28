@@ -24,9 +24,9 @@
     </section>
 
     <form id="add" class="add">
-      <input name="name" placeholder="Name" maxlength="64" required>
-      <input name="host" placeholder="IP address or host name" maxlength="253" required>
-      <button type="submit">Add target</button>
+      <input name="name" title="Shown in the list" placeholder="Name" maxlength="64" required>
+      <input name="host" title="IPv4 or IPv6 address, or a DNS name (resolved every cycle)" placeholder="IP address or host name" maxlength="253" required>
+      <button type="submit" title="Start probing this host once a minute">Add target</button>
       <span id="add-error" class="error" role="alert"></span>
     </form>
   </main>
@@ -38,7 +38,7 @@
 
   <template id="row">
     <article class="target">
-      <button class="head" type="button" aria-expanded="false">
+      <button class="head" type="button" aria-expanded="false" title="Show or hide the 24-hour chart and the actions">
         <span class="badge"></span>
         <span class="who"><span class="name"></span><span class="host"></span></span>
         <span class="beats" aria-hidden="true"></span>

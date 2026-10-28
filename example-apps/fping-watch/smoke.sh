@@ -122,4 +122,21 @@ status 403 POST /api/targets/1/pause
 status 403 DELETE /api/targets/1
 stop
 
+# Demo: read-only, the hours before the first cycle are sample data.
+cat > demo.json <<'EOF2'
+{ "targets": [ { "id": 1, "name": "lo", "host": "127.0.0.1", "demo": "outage" } ] }
+EOF2
+sed 's/"outage"/"nope"/' demo.json > bad-demo.json
+"$BIN" --demo --targets bad-demo.json >log 2>&1 && fail "demo started with an unknown scenario"
+start --demo --targets demo.json
+curl -sf "$URL/healthz" | grep -q '"read_only":true,"demo":true' || fail "/healthz does not report the demo"
+i=0
+until curl -sf "$URL/api/state" | grep -q '"demo_from":[1-9]'; do
+    i=$((i + 1)); [ $i -lt 150 ] || fail "no sample data after the first cycle"; sleep 0.1
+done
+# Sample data reaches back the full 24 hours: the first loss entry is a number.
+curl -sf "$URL/api/state" | grep -q '"loss":\[[0-9]' || fail "sample data does not fill the history"
+status 403 DELETE /api/targets/1
+stop
+
 echo "smoke: ok"
