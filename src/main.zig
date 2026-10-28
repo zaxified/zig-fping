@@ -27,7 +27,7 @@ const exit_noaddress = context.exit_noaddress;
 const exit_usage = context.exit_usage;
 const exit_internal = context.exit_internal;
 
-const version_string = "zfping 0.2.0 (Zig port of fping, https://fping.org)";
+const version_string = "zfping 0.2.1 (Zig port of fping, https://fping.org)";
 
 /// Program name for error prefixes — argv[0] as invoked, like fping's
 /// global `prog`. Set early in main().

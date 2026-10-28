@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+### Pending upstream (deferred)
+
+To be implemented once the change reaches an upstream release tag
+(Compatible-with release is `v5.5`):
+
+- `--print-reply-dst` and the JSON `src` field (upstream `292d56f`,
+  `e269abd`, `acb6579`, IPv6 in `8163e28`; unreleased as of v5.5). Prints
+  the local address a reply arrived on, for both IPv4 and IPv6. `socket.zig`
+  builds `IP_PKTINFO`/`IPV6_PKTINFO` only for *sending* (`--oiface`); the
+  receive path enables `RECVTTL`/`RECVTOS` but not
+  `IP_PKTINFO`/`IPV6_RECVPKTINFO`, so this needs the receive socket options,
+  cmsg parsing for the reply's destination address, and that address carried
+  through the reply struct into the renderers in `src/cli/output.zig`.
+
+## 0.2.1 — fping-watch as a Debian package, deployment hardening (2026-10-28)
+
+No library or CLI changes: zfping behaves exactly as in 0.2.0.
+
 ### fping-watch 1.0.0: a finished application, shipped as a Debian package
 
 The example application is no longer a proof of concept: it is finished for
@@ -59,19 +77,25 @@ targets and a real time-series store are out of its scope.
   unbounded, and when no thread could be started the accept loop served the
   connection itself, so one idle client stopped the server.
 
-### Pending upstream (deferred)
+### Build, release and documentation
 
-To be implemented once the change reaches an upstream release tag
-(Compatible-with release is `v5.5`):
-
-- `--print-reply-dst` and the JSON `src` field (upstream `292d56f`,
-  `e269abd`, `acb6579`, IPv6 in `8163e28`; unreleased as of v5.5). Prints
-  the local address a reply arrived on, for both IPv4 and IPv6. `socket.zig`
-  builds `IP_PKTINFO`/`IPV6_PKTINFO` only for *sending* (`--oiface`); the
-  receive path enables `RECVTTL`/`RECVTOS` but not
-  `IP_PKTINFO`/`IPV6_RECVPKTINFO`, so this needs the receive socket options,
-  cmsg parsing for the reply's destination address, and that address carried
-  through the reply struct into the renderers in `src/cli/output.zig`.
+- **Actions pinned to commit SHAs** in every workflow (the release job runs
+  with `contents: write` and builds the packages servers install as root; a
+  moved tag could change what runs). Dependabot proposes the updates
+  monthly. `upstream-check.yml` moves from `actions/checkout` v4 to v5.
+- `scripts/zig-env.sh` checks a downloaded Zig tarball against a SHA256
+  pinned in the script (from ziglang.org's `index.json`) and refuses a
+  version without a pinned hash; before, the download was used unchecked.
+- `scripts/test.sh` fails when no reference fping is available (5.5 could
+  not be built and none is installed); `test/golden.sh` skips with exit 0
+  then, which let the gate pass without a golden diff.
+- `scripts/release.sh` refuses to build when `src/main.zig`, `doc/zfping.8`
+  or the release tag disagree with the `build.zig.zon` version.
+- `scripts/bench.sh` times into a `mktemp` file instead of `/tmp/bench.time`.
+- README: the download example pointed at v0.1.3 (the Zig 0.16 line) and
+  now verifies `SHA256SUMS`; binary sizes re-measured (ReleaseSafe ~530 KB,
+  ReleaseSmall ~270 KB); a persistent `ping_group_range` instead of
+  `sysctl -w`; the CI cross targets as they are; the fping-watch packages.
 
 ## 0.2.0 — first release for Zig 0.17 (2026-10-18)
 

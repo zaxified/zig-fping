@@ -7,7 +7,7 @@
     .dependencies = .{
         // The library from this repository's checkout. A copy of this
         // directory taken on its own would pin a release instead:
-        //   .url = "git+https://github.com/zaxified/zig-fping#v0.2.0",
+        //   .url = "git+https://github.com/zaxified/zig-fping#v0.2.1",
         //   .hash = "...",            (zig fetch --save <url> fills it in)
         .zig_fping = .{ .path = "../.." },
     },
