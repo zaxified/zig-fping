@@ -3,8 +3,8 @@
 //!
 //! Every cycle sends a few echo requests to each active target through one
 //! `zig_fping.Pinger` (so global pacing and in-flight limits apply across all
-//! targets) and stores one `Sample` per target: probes sent, replies received
-//! and the median round-trip time.
+//! targets) and stores one `Sample` per target: probes sent, replies received,
+//! the median round-trip time and the jitter.
 //!
 //! Locking: `mutex` guards `targets` and everything inside them. Probing runs
 //! without the lock, on a copy of the target list, so the web UI never waits
@@ -33,6 +33,9 @@ pub const Sample = struct {
     recv: u8 = 0,
     /// Median round-trip time of the replies, microseconds.
     rtt_us: u32 = 0,
+    /// Mean difference between consecutive replies' round-trip times,
+    /// microseconds; 0 with fewer than two replies.
+    jitter_us: u32 = 0,
 };
 
 pub const Status = enum {
@@ -275,6 +278,7 @@ pub const Monitor = struct {
             sample.recv = job.replies;
             if (job.replies > 0) {
                 const r = job.rtts[0..job.replies];
+                sample.jitter_us = jitter(r);
                 std.mem.sortUnstable(u32, r, {}, std.sort.asc(u32));
                 sample.rtt_us = r[r.len / 2];
             }
@@ -351,10 +355,10 @@ pub const Monitor = struct {
     }
 
     /// History file: per target id, the non-empty samples as
-    /// `[t, sent, recv, rtt_us]`.
+    /// `[t, sent, recv, rtt_us, jitter_us]`; files from 1.0.0 lack `jitter_us`.
     const HistoryFile = struct {
         cycle_s: i64,
-        targets: []const struct { id: u32, samples: []const [4]i64 },
+        targets: []const struct { id: u32, samples: []const []const i64 },
     };
 
     pub fn loadHistory(m: *Monitor) !void {
@@ -385,12 +389,14 @@ pub const Monitor = struct {
         for (parsed.value.targets) |entry| {
             const t = m.targets.items[m.find(entry.id) orelse continue];
             for (entry.samples) |s| {
+                if (s.len != 4 and s.len != 5) continue;
                 if (s[0] <= oldest) continue;
                 const sample: Sample = .{
                     .t = s[0],
                     .sent = std.math.cast(u8, s[1]) orelse continue,
                     .recv = std.math.cast(u8, s[2]) orelse continue,
                     .rtt_us = std.math.cast(u32, s[3]) orelse continue,
+                    .jitter_us = if (s.len == 5) std.math.cast(u32, s[4]) orelse continue else 0,
                 };
                 // writeSeries computes `sent - recv`.
                 if (sample.sent > probes_per_cycle or sample.recv > sample.sent) continue;
@@ -411,7 +417,7 @@ pub const Monitor = struct {
             var first = true;
             for (t.history) |s| {
                 if (s.t == 0) continue;
-                w.print("{s}[{d},{d},{d},{d}]", .{ if (first) "" else ",", s.t, s.sent, s.recv, s.rtt_us }) catch return;
+                w.print("{s}[{d},{d},{d},{d},{d}]", .{ if (first) "" else ",", s.t, s.sent, s.recv, s.rtt_us, s.jitter_us }) catch return;
                 first = false;
             }
             w.writeAll("]}") catch return;
@@ -455,7 +461,7 @@ pub const Monitor = struct {
         return .{ .tag = tag, .json = try arena.dupe(u8, m.state_cache.items) };
     }
 
-    /// Per target, `rtt` (ms) and `loss` (%) hold one entry per cycle of the
+    /// Per target, `rtt` (ms), `jitter` (ms) and `loss` (%) hold one entry per cycle of the
     /// last 24 hours, oldest first, the newest at cycle start `newest`;
     /// `null` where there is no sample.
     fn writeStateLocked(m: *Monitor, w: *Io.Writer, newest: i64) Io.Writer.Error!void {
@@ -476,6 +482,8 @@ pub const Monitor = struct {
             );
             try w.writeAll(",\"rtt\":[");
             try m.writeSeries(w, t, newest, .rtt);
+            try w.writeAll("],\"jitter\":[");
+            try m.writeSeries(w, t, newest, .jitter);
             try w.writeAll("],\"loss\":[");
             try m.writeSeries(w, t, newest, .loss);
             try w.writeAll("]}");
@@ -483,7 +491,7 @@ pub const Monitor = struct {
         try w.writeAll("]}");
     }
 
-    fn writeSeries(m: *Monitor, w: *Io.Writer, t: *const Target, newest: i64, comptime what: enum { rtt, loss }) Io.Writer.Error!void {
+    fn writeSeries(m: *Monitor, w: *Io.Writer, t: *const Target, newest: i64, comptime what: enum { rtt, jitter, loss }) Io.Writer.Error!void {
         var k: i64 = history_len - 1;
         while (k >= 0) : (k -= 1) {
             const at = newest - k * m.cycle_s;
@@ -492,7 +500,8 @@ pub const Monitor = struct {
             if (s.t != at or s.sent == 0) {
                 try w.writeAll("null");
             } else switch (what) {
-                .rtt => if (s.recv == 0) try w.writeAll("null") else try w.print("{d:.1}", .{@as(f64, @floatFromInt(s.rtt_us)) / 1000}),
+                .rtt => if (s.recv == 0) try w.writeAll("null") else try w.print("{d:.2}", .{@as(f64, @floatFromInt(s.rtt_us)) / 1000}),
+                .jitter => if (s.recv < 2) try w.writeAll("null") else try w.print("{d:.2}", .{@as(f64, @floatFromInt(s.jitter_us)) / 1000}),
                 .loss => try w.print("{d}", .{@as(u32, s.sent - s.recv) * 100 / s.sent}),
             }
         }
@@ -500,6 +509,15 @@ pub const Monitor = struct {
 };
 
 // ----- helpers ------------------------------------------------------------------
+
+/// Mean absolute difference between consecutive round-trip times, in reply
+/// order (the usual "jitter" of ping tools); 0 with fewer than two.
+fn jitter(rtts: []const u32) u32 {
+    if (rtts.len < 2) return 0;
+    var sum: u64 = 0;
+    for (rtts[1..], rtts[0 .. rtts.len - 1]) |b, a| sum += @max(a, b) - @min(a, b);
+    return @intCast(sum / (rtts.len - 1));
+}
 
 fn validateName(name: []const u8) Error!void {
     if (name.len == 0 or name.len > 64) return error.InvalidName;
@@ -625,6 +643,7 @@ test "status follows the last sample" {
     fakeCycle(&m, id, 60, 5);
     try testing.expectEqual(.up, t.status());
     try testing.expectEqual(@as(u32, 3000), t.last.rtt_us); // median of 1..5 ms
+    try testing.expectEqual(@as(u32, 1000), t.last.jitter_us); // 1 ms steps
     fakeCycle(&m, id, 120, 2);
     try testing.expectEqual(.degraded, t.status());
     fakeCycle(&m, id, 180, 0);
@@ -739,13 +758,24 @@ test "persistence: missing target list, unusable history, atomic writes" {
     var json: [256]u8 = undefined;
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "history.json", .data = try std.mem.print(
         &json,
-        "{{\"cycle_s\":60,\"targets\":[{{\"id\":{d},\"samples\":[[{d},2,5,1000],[{d},5,4,1000]]}}]}}",
-        .{ id, t - 60, t },
+        "{{\"cycle_s\":60,\"targets\":[{{\"id\":{d},\"samples\":[[{d},2,5,1000],[{d},5,4,1000],[{d},5,5,900,70],[{d},5]]}}]}}",
+        .{ id, t - 180, t - 120, t - 60, t },
     ) });
     try m.loadHistory();
     const target = m.targets.items[0];
-    try testing.expectEqual(0, target.history[m.slot(t - 60)].t);
-    try testing.expectEqual(4, target.history[m.slot(t)].recv);
+    try testing.expectEqual(0, target.history[m.slot(t - 180)].t);
+    // A 1.0.0 sample (no jitter) and a current one load; a short one does not.
+    try testing.expectEqual(4, target.history[m.slot(t - 120)].recv);
+    try testing.expectEqual(0, target.history[m.slot(t - 120)].jitter_us);
+    try testing.expectEqual(70, target.history[m.slot(t - 60)].jitter_us);
+    try testing.expectEqual(0, target.history[m.slot(t)].t);
+}
+
+test "jitter is the mean step between consecutive replies" {
+    try testing.expectEqual(0, jitter(&.{}));
+    try testing.expectEqual(0, jitter(&.{1000}));
+    try testing.expectEqual(0, jitter(&.{ 500, 500, 500 }));
+    try testing.expectEqual(1500, jitter(&.{ 1000, 3000, 2000 })); // (2000 + 1000) / 2
 }
 
 test "names and hosts are validated" {

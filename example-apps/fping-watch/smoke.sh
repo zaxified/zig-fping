@@ -82,6 +82,7 @@ done
 STATE=$(curl -sf "$URL/api/state")
 echo "$STATE" | grep -q '"name":"lo4"[^}]*"status":"up"' || fail "127.0.0.1 not up"
 echo "$STATE" | grep -q '"name":"lo6"[^}]*"status":"up"' || fail "::1 not up"
+echo "$STATE" | grep -q '"name":"lo4"[^}]*"jitter":\[[^]]*[0-9]' || fail "no jitter for 127.0.0.1"
 
 # Polling with the ETag costs a body-less 304 until the state changes (a
 # cycle may complete between the two requests: retry).

@@ -92,6 +92,7 @@ header {
 .chart .grid { stroke: var(--line); stroke-width: 1; }
 .chart .axis { fill: var(--muted); font-size: 11px; }
 .chart .area { fill: color-mix(in srgb, var(--accent) 15%, transparent); }
+.chart .band { fill: color-mix(in srgb, var(--accent) 22%, transparent); }
 .chart .rtt { fill: none; stroke: var(--accent); stroke-width: 1.5; stroke-linejoin: round; }
 .chart .loss { fill: var(--down); opacity: 0.7; }
 .chart .partial { fill: var(--warn); opacity: 0.7; }
@@ -113,6 +114,7 @@ button, input { font: inherit; }
 }
 .actions button:hover, .add button:hover { border-color: var(--accent); }
 .actions .danger { color: var(--down); }
+.note { color: var(--muted); font-size: 13px; align-self: center; }
 .add { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 18px; }
 .add input {
   flex: 1 1 180px; padding: 7px 10px; border-radius: 8px;
@@ -121,6 +123,7 @@ button, input { font: inherit; }
 .add button { background: var(--accent); border-color: var(--accent); color: #fff; }
 .error { color: var(--down); font-size: 13px; flex-basis: 100%; }
 .error:empty { display: none; }
+.error.demo { color: var(--muted); }
 
 footer { color: var(--muted); font-size: 13px; padding-top: 24px; padding-bottom: 32px; }
 footer a { color: inherit; }

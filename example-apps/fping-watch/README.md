@@ -9,12 +9,14 @@ handful of targets once a minute and serves a web page with the last 24 hours.
 
 - one row per target with its status, a strip of recent cycles (green: all
   replies, orange: some lost, red: all lost), 24-hour uptime and current latency;
-- click a row for the 24-hour latency chart with packet loss underneath;
+- click a row for the 24-hour latency chart (median per cycle, a band of ± the
+  cycle's jitter) with packet loss underneath, and the 24-hour average, 95th
+  percentile, jitter, best/worst latency, loss and uptime;
 - add, remove and **pause** targets; **acknowledge** a DOWN target the way
   Nagios does: it shows ACK instead of DOWN until 5 cycles in a row are not DOWN
   again, so the next outage is reported;
-- `--read-only` for a public demo: the server refuses every change (HTTP 403),
-  and the page hides the controls.
+- `--read-only` for a public demo: the server refuses every change (HTTP 403);
+  the page still shows every control, and using one says it is a demo.
 
 Writable is the default: you run it for yourself, on loopback. The public
 demo is the same package with one setting changed ([Deploying](#deploying)).
@@ -73,8 +75,9 @@ resolves names, and pings all of them in **one** `Pinger` round in `.count`
 mode: 5 echo requests per target, 1 s apart per target, 20 ms apart globally,
 with a random start offset of up to 500 ms per target. That is the library's
 pacing at work: the probes are spread out, never burst into the network. The
-results are recorded under a lock: probes sent, replies, and the median
-round-trip time. The web UI therefore never waits for a cycle.
+results are recorded under a lock: probes sent, replies, the median
+round-trip time and the jitter (the mean difference between consecutive
+replies' round-trip times, as ping tools report it). The web UI therefore never waits for a cycle.
 
 History is a ring of 1440 slots per target, indexed by cycle number, so a gap
 (daemon stopped, target paused) needs no bookkeeping: a slot whose timestamp is
@@ -84,7 +87,7 @@ not the expected one is shown as "no data".
 
 | | |
 |---|---|
-| `GET /api/state` | everything the page shows: per target status, flags and the 24 h series `rtt` (ms) and `loss` (%), one entry per cycle, oldest first, `null` = no data; carries an ETag, `If-None-Match` gets `304` until the state changes |
+| `GET /api/state` | everything the page shows: per target status, flags and the 24 h series `rtt` (ms, median), `jitter` (ms, `null` with fewer than two replies) and `loss` (%), one entry per cycle, oldest first, `null` = no data; carries an ETag, `If-None-Match` gets `304` until the state changes |
 | `POST /api/targets` | add: `{"name": "...", "host": "..."}` |
 | `DELETE /api/targets/ID` | remove |
 | `POST /api/targets/ID/pause`, `/resume` | stop and resume probing |

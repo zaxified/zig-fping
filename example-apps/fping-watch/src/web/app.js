@@ -34,23 +34,45 @@ const statusOf = (t) => (t.status === "down" && t.acked ? "acked" : t.status);
 const beatColor = (loss) =>
   loss === null ? "" : loss === 0 ? "var(--up)" : loss < 100 ? "var(--warn)" : "var(--down)";
 
-const ms = (v) => (v === null || v === undefined ? "–" : v < 10 ? `${v.toFixed(1)} ms` : `${Math.round(v)} ms`);
+const ms = (v) =>
+  v === null || v === undefined ? "–" : v < 1 ? `${v.toFixed(2)} ms` : v < 10 ? `${v.toFixed(1)} ms` : `${Math.round(v)} ms`;
+const mean = (a) => (a.length ? a.reduce((x, y) => x + y, 0) / a.length : null);
+// Nearest-rank percentile.
+const percentile = (a, p) => {
+  if (!a.length) return null;
+  const sorted = [...a].sort((x, y) => x - y);
+  return sorted[Math.min(sorted.length - 1, Math.ceil((p / 100) * sorted.length) - 1)];
+};
+// One cycle, for the beat strip and the chart tooltip.
+const describe = (t, i, at) =>
+  t.loss[i] === null
+    ? `${time(at)} · no data`
+    : `${time(at)} · ${ms(t.rtt[i])}` + (t.jitter[i] === null ? "" : ` ± ${ms(t.jitter[i])}`) + ` · ${t.loss[i]} % loss`;
 const time = (unix) => new Date(unix * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
 function summarize(t) {
   const rtts = t.rtt.filter((v) => v !== null);
   const losses = t.loss.filter((v) => v !== null);
+  const jitters = t.jitter.filter((v) => v !== null);
   const up = losses.filter((v) => v < 100).length;
-  let last = null;
-  for (let i = t.rtt.length - 1; i >= 0 && last === null; i--) if (t.loss[i] !== null) last = t.rtt[i];
+  let last = null, lastJitter = null;
+  for (let i = t.rtt.length - 1; i >= 0; i--) {
+    if (t.loss[i] === null) continue;
+    last = t.rtt[i];
+    lastJitter = t.jitter[i];
+    break;
+  }
   return {
     samples: losses.length,
     uptime: losses.length ? (100 * up) / losses.length : null,
-    avg: rtts.length ? rtts.reduce((a, b) => a + b, 0) / rtts.length : null,
+    avg: mean(rtts),
     min: rtts.length ? Math.min(...rtts) : null,
     max: rtts.length ? Math.max(...rtts) : null,
-    loss: losses.length ? losses.reduce((a, b) => a + b, 0) / losses.length : null,
+    p95: percentile(rtts, 95),
+    jitter: mean(jitters),
+    loss: mean(losses),
     last,
+    lastJitter,
   };
 }
 
@@ -76,7 +98,12 @@ async function load() {
   }
 }
 
+// A read-only demo shows every control, so it looks like the real thing;
+// using one explains instead of failing (the server refuses anyway).
+const DEMO_NOTE = "This is a read-only demo: changes are disabled. Install fping-watch to manage your own targets.";
+
 async function call(method, path, body) {
+  if (state.read_only) throw new Error(DEMO_NOTE);
   const res = await fetch(path, {
     method,
     headers: { "content-type": "application/json" },
@@ -92,7 +119,6 @@ async function call(method, path, body) {
 
 function render() {
   $("#mode").hidden = !state.read_only;
-  $("#add").hidden = state.read_only;
 
   const counts = {};
   for (const t of state.targets) counts[statusOf(t)] = (counts[statusOf(t)] || 0) + 1;
@@ -152,7 +178,7 @@ function renderBeats(box, t) {
     const c = beatColor(t.loss[i]);
     if (c) b.style.setProperty("--c", c);
     const at = state.end - (t.loss.length - 1 - i) * state.cycle_s;
-    b.title = t.loss[i] === null ? `${time(at)} · no data` : `${time(at)} · ${ms(t.rtt[i])} · ${t.loss[i]} % loss`;
+    b.title = describe(t, i, at);
     box.append(b);
   }
 }
@@ -167,8 +193,10 @@ function renderDetail(detail, t, s) {
     d.prepend(el("b", null, value));
     stats.append(d);
   };
-  stat("current", ms(s.last));
+  stat("current", s.lastJitter === null ? ms(s.last) : `${ms(s.last)} ± ${ms(s.lastJitter)}`);
   stat("average (24 h)", ms(s.avg));
+  stat("95th percentile (24 h)", ms(s.p95));
+  stat("jitter (24 h)", ms(s.jitter));
   stat("best / worst", `${ms(s.min)} / ${ms(s.max)}`);
   stat("packet loss (24 h)", s.loss === null ? "–" : `${s.loss.toFixed(2)} %`);
   stat("uptime (24 h)", s.uptime === null ? "–" : `${s.uptime.toFixed(2)} %`);
@@ -177,13 +205,14 @@ function renderDetail(detail, t, s) {
 
   const actions = $(".actions", detail);
   actions.replaceChildren();
-  if (state.read_only) return;
+  const note = el("span", "note");
   const action = (text, fn, cls) => {
     const b = el("button", cls, text);
     b.type = "button";
     b.addEventListener("click", async () => {
       b.disabled = true;
-      try { await fn(); } catch (err) { alert(err.message); b.disabled = false; }
+      note.textContent = "";
+      try { await fn(); } catch (err) { note.textContent = err.message; b.disabled = false; }
     });
     actions.append(b);
   };
@@ -192,7 +221,8 @@ function renderDetail(detail, t, s) {
   else action("Pause", () => call("POST", `${base}/pause`));
   if (t.status === "down" && !t.acked) action("Acknowledge", () => call("POST", `${base}/ack`));
   if (t.acked) action("Remove acknowledgement", () => call("POST", `${base}/unack`));
-  action("Remove", () => confirm(`Remove ${t.name}?`) && call("DELETE", base).then(() => open.delete(t.id)), "danger");
+  action("Remove", () => (state.read_only || confirm(`Remove ${t.name}?`)) && call("DELETE", base).then(() => open.delete(t.id)), "danger");
+  actions.append(note);
 }
 
 function renderChart(box, t) {
@@ -200,7 +230,7 @@ function renderChart(box, t) {
   const H = 180, L = 44, R = 8, T = 10, B = 34, LOSS_H = 6;
   const n = t.rtt.length;
   const x = (i) => L + (i * (W - L - R)) / (n - 1);
-  const values = t.rtt.filter((v) => v !== null);
+  const values = t.rtt.map((v, i) => (v === null ? null : v + (t.jitter[i] || 0))).filter((v) => v !== null);
   const top = niceCeil(Math.max(1, ...values) * 1.1);
   const y = (v) => T + (H - T - B) * (1 - v / top);
 
@@ -218,18 +248,23 @@ function renderChart(box, t) {
     svg.append(label);
   }
 
-  // Latency: one path per run of consecutive samples, so gaps stay gaps.
-  let line = "", area = "", run = [];
+  // Latency: one path per run of consecutive samples, so gaps stay gaps; the
+  // band around the line is ± the cycle's jitter.
+  let line = "", area = "", band = "", run = [];
+  const pt = (i, v) => `${x(i).toFixed(1)},${y(Math.max(0, v)).toFixed(1)}`;
   const flush = () => {
     if (run.length) {
-      line += "M" + run.map(([i, v]) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join("L");
-      area += `M${x(run[0][0]).toFixed(1)},${y(0)}` + run.map(([i, v]) => `L${x(i).toFixed(1)},${y(v).toFixed(1)}`).join("") + `L${x(run[run.length - 1][0]).toFixed(1)},${y(0)}Z`;
+      line += "M" + run.map(([i, v]) => pt(i, v)).join("L");
+      area += `M${pt(run[0][0], 0)}` + run.map(([i, v]) => `L${pt(i, v)}`).join("") + `L${pt(run[run.length - 1][0], 0)}Z`;
+      const j = (i) => t.jitter[i] || 0;
+      band += "M" + run.map(([i, v]) => pt(i, v + j(i))).join("L") +
+        "L" + run.slice().reverse().map(([i, v]) => pt(i, v - j(i))).join("L") + "Z";
     }
     run = [];
   };
   t.rtt.forEach((v, i) => (v === null ? flush() : run.push([i, v])));
   flush();
-  svg.append(svgEl("path", { class: "area", d: area }), svgEl("path", { class: "rtt", d: line }));
+  svg.append(svgEl("path", { class: "area", d: area }), svgEl("path", { class: "band", d: band }), svgEl("path", { class: "rtt", d: line }));
 
   // Loss: a strip under the chart, orange for partial and red for total loss.
   const w = Math.max(1.5, (W - L - R) / n);
@@ -250,8 +285,7 @@ function renderChart(box, t) {
     cursor.setAttribute("x1", x(i));
     cursor.setAttribute("x2", x(i));
     cursor.setAttribute("visibility", "visible");
-    const at = time(state.end - (n - 1 - i) * state.cycle_s);
-    tip.textContent = t.loss[i] === null ? `${at} · no data` : `${at} · ${ms(t.rtt[i])} · ${t.loss[i]} % loss`;
+    tip.textContent = describe(t, i, state.end - (n - 1 - i) * state.cycle_s);
     tip.hidden = false;
     const left = (x(i) / W) * r.width;
     tip.style.left = `${Math.min(left + 8, r.width - tip.offsetWidth)}px`;
@@ -280,6 +314,7 @@ $("#add").addEventListener("submit", async (ev) => {
     form.reset();
   } catch (err) {
     $("#add-error").textContent = err.message;
+    $("#add-error").classList.toggle("demo", state.read_only);
   }
 });
 
