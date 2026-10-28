@@ -1,0 +1,13 @@
+#!/bin/sh
+# remove keeps the target list, env file and history; purge deletes them.
+# DynamicUser keeps the state in /var/lib/private, linked from /var/lib.
+set -e
+case "$1" in
+    remove | purge)
+        [ -d /run/systemd/system ] && systemctl daemon-reload || true
+        ;;
+esac
+if [ "$1" = purge ]; then
+    rm -rf /etc/fping-watch /var/lib/fping-watch /var/lib/private/fping-watch
+fi
+exit 0

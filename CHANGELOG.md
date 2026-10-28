@@ -2,7 +2,26 @@
 
 ## Unreleased
 
-### fping-watch: ready for a public read-only instance
+### fping-watch 1.0.0: a finished demo, shipped as a Debian package
+
+The example application is no longer a proof of concept: it is finished for
+its purpose (the library's example and a public read-only demo) and stays
+deliberately small. Authentication, more targets and a real time-series
+store are out of its scope.
+
+- **Debian packages**: releases now carry `fping-watch_<version>_amd64.deb` and
+  `_arm64.deb`, built by `example-apps/fping-watch/package.sh` (called by
+  `scripts/release.sh`, which smoke-tests the packaged binary). They install a
+  sandboxed systemd service (`DynamicUser`, seccomp `@system-service`, IP
+  sockets only, `systemd-analyze security` 1.6), read-only on
+  `127.0.0.1:8080`; `/etc/fping-watch/targets.json` is copied from the default
+  on first install only, and `/etc/fping-watch/env` sets the listen address.
+  Tested in a Debian container under systemd: install, reconfigure, upgrade,
+  remove, purge.
+- `GET /healthz`: `503` when cycles stop finishing or the ICMP socket cannot
+  be opened.
+- `--version`; startup errors (no target list, unreadable history, port in
+  use) are one line on stderr instead of an error trace; a favicon.
 
 - Many viewers cost one serialization per change: `/api/state` is built once
   per state version (a recorded cycle, a target change, a new cycle start)

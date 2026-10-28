@@ -21,6 +21,7 @@ const usage =
     \\  --history FILE       keep the 24 h history across restarts (default: memory only)
     \\  --read-only          public demo: refuse every change
     \\  --cycle SECONDS      seconds between probing cycles (default 60)
+    \\  --version            print the version and exit
     \\
 ;
 
@@ -40,6 +41,10 @@ pub fn main(init: std.process.Init) !void {
             monitor.read_only = true;
             continue;
         }
+        if (std.mem.eql(u8, arg, "--version")) {
+            print(io, "fping-watch {s}\n", .{version});
+            return;
+        }
         if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) return fail(io, "");
         if (i + 1 == args.len) return fail(io, "missing value");
         const value = args[i + 1];
@@ -56,14 +61,15 @@ pub fn main(init: std.process.Init) !void {
         } else return fail(io, "unknown option");
     }
 
-    try monitor.loadConfig();
-    try monitor.loadHistory();
+    monitor.loadConfig() catch |err| fatal(io, "cannot load the targets from {s}: {t}", .{ monitor.config_path, err });
+    monitor.loadHistory() catch |err| fatal(io, "cannot load the history from {s}: {t} (move it away to start afresh)", .{ monitor.history_path.?, err });
 
     const address = Io.net.IpAddress.parseLiteral(listen_text) catch return fail(io, "bad --listen");
-    var server = try address.listen(io, .{ .reuse_address = true });
+    var server = address.listen(io, .{ .reuse_address = true }) catch |err|
+        fatal(io, "cannot listen on {s}: {t}", .{ listen_text, err });
     defer server.deinit(io);
-    log.info("listening on http://{s} ({d} targets{s})", .{
-        listen_text, monitor.targets.items.len, if (monitor.read_only) ", read-only" else "",
+    log.info("fping-watch {s} listening on http://{s} ({d} targets{s})", .{
+        version, listen_text, monitor.targets.items.len, if (monitor.read_only) ", read-only" else "",
     });
 
     // The probing loop, the reaper and every connection run concurrently;
@@ -149,13 +155,30 @@ const Connections = struct {
     }
 };
 
-fn fail(io: Io, msg: []const u8) error{InvalidArguments} {
+fn fail(io: Io, msg: []const u8) noreturn {
+    if (msg.len > 0) eprint(io, "fping-watch: {s}\n", .{msg});
+    eprint(io, usage, .{});
+    std.process.exit(2);
+}
+
+/// A startup error: one readable line (systemd shows it), no stack trace.
+fn fatal(io: Io, comptime fmt: []const u8, args: anytype) noreturn {
+    eprint(io, "fping-watch: " ++ fmt ++ "\n", args);
+    std.process.exit(1);
+}
+
+fn eprint(io: Io, comptime fmt: []const u8, args: anytype) void {
     var buf: [1024]u8 = undefined;
     var w = Io.File.stderr().writer(io, &buf);
-    if (msg.len > 0) w.interface.print("fping-watch: {s}\n", .{msg}) catch {};
-    w.interface.writeAll(usage) catch {};
+    w.interface.print(fmt, args) catch {};
     w.interface.flush() catch {};
-    return error.InvalidArguments;
+}
+
+fn print(io: Io, comptime fmt: []const u8, args: anytype) void {
+    var buf: [256]u8 = undefined;
+    var w = Io.File.stdout().writer(io, &buf);
+    w.interface.print(fmt, args) catch {};
+    w.interface.flush() catch {};
 }
 
 fn probeLoop(monitor: *Monitor) void {
@@ -164,9 +187,12 @@ fn probeLoop(monitor: *Monitor) void {
 
 // ----- HTTP ---------------------------------------------------------------------
 
+const version = @import("build_options").version;
+
 const index_html = @embedFile("web/index.html");
 const app_js = @embedFile("web/app.js");
 const style_css = @embedFile("web/style.css");
+const favicon_svg = @embedFile("web/favicon.svg");
 
 /// Sent with every response. The page loads nothing from other origins and
 /// has no inline script, so the policy can be strict.
@@ -203,7 +229,15 @@ fn route(monitor: *Monitor, req: *http.Server.Request, arena: std.mem.Allocator)
         if (std.mem.eql(u8, path, "/")) return send(req, .ok, "text/html; charset=utf-8", index_html);
         if (std.mem.eql(u8, path, "/app.js")) return send(req, .ok, "text/javascript", app_js);
         if (std.mem.eql(u8, path, "/style.css")) return send(req, .ok, "text/css", style_css);
+        if (std.mem.eql(u8, path, "/favicon.svg")) return send(req, .ok, "image/svg+xml", favicon_svg);
         if (std.mem.eql(u8, path, "/api/state")) return sendState(monitor, req, arena);
+        if (std.mem.eql(u8, path, "/healthz")) {
+            const h = monitor.health(Io.Clock.real.now(monitor.io).toSeconds());
+            return send(req, if (h.ok) .ok else .service_unavailable, "application/json", try arena.print(
+                "{{\"ok\":{},\"probing_ok\":{},\"last_cycle\":{d},\"version\":\"{s}\"}}",
+                .{ h.ok, h.probing_ok, h.last_cycle, version },
+            ));
+        }
         return sendError(req, .not_found, "not found");
     }
 

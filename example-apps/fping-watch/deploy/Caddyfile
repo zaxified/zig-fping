@@ -1,0 +1,7 @@
+# Caddy site for the fping-watch demo; replace the host name, and the port
+# if /etc/fping-watch/env changes it. Caddy adds TLS; compression matters
+# because the state is about 15 KB per target.
+ping.example.org {
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:8080
+}

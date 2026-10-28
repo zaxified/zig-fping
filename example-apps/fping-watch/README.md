@@ -16,11 +16,13 @@ handful of targets once a minute and serves a web page with the last 24 hours.
 - `--read-only` for a public demo: the server refuses every change (HTTP 403),
   and the page hides the controls.
 
-It is a proof of concept and an example of the library, small enough to read
-in one sitting: `src/monitor.zig` (targets, probing, history, persistence),
-`src/main.zig` (HTTP server and API), `src/web/` (the page; no framework and no
-build step, embedded into the binary). Nothing beyond Zig's standard library
-and `zig_fping`.
+It is the library's example application and a public demo, finished for that
+purpose and deliberately kept small enough to read in one sitting:
+`src/monitor.zig` (targets, probing, history, persistence), `src/main.zig`
+(HTTP server and API), `src/web/` (the page; no framework and no build step,
+embedded into the binary). Nothing beyond Zig's standard library and
+`zig_fping`. It ships as a Debian package with a sandboxed systemd service
+([Deploying](#deploying)).
 
 ## Build and run
 
@@ -40,6 +42,7 @@ zig build                     # ReleaseSafe by default
 | `--history FILE` | (memory only) | the 24-hour history, saved after every cycle |
 | `--read-only` | off | refuse every change |
 | `--cycle SECONDS` | `60` | seconds between cycles (the tests use 5) |
+| `--version` | | print the version and exit |
 
 Pinging needs ICMP sockets: either unprivileged ones
 (`sysctl net.ipv4.ping_group_range` covering your group, the default on most
@@ -78,16 +81,20 @@ not the expected one is shown as "no data".
 | `DELETE /api/targets/ID` | remove |
 | `POST /api/targets/ID/pause`, `/resume` | stop and resume probing |
 | `POST /api/targets/ID/ack`, `/unack` | acknowledge a DOWN target, or withdraw the acknowledgement |
+| `GET /healthz` | `200 {"ok":true,...}` while cycles keep finishing (at most 3 cycles apart) and the ICMP socket opens; `503` otherwise. Unreachable targets do not count: they are what is being monitored |
 
 Changes must be sent as `application/json`: a cross-site HTML form cannot do
 that without a CORS preflight, which the server never approves, so a page on
 another site cannot change the targets behind your back.
 
-## Deliberate simplifications
+## Scope
+
+Kept out on purpose, so the example stays small; they belong to a real
+monitoring product, not to a library demo:
 
 - **No authentication.** Without `--read-only`, anyone who reaches the port can
-  change the targets. The default address is loopback; put a reverse proxy with
-  authentication in front, or run the public instance read-only.
+  change the targets. The default address is loopback; the public instance runs
+  read-only.
 - **One request per connection, no TLS.** Each connection is served on its own
   thread and closed after one response. A reverse proxy in front provides
   keep-alive, TLS, compression and per-client rate limits.
@@ -125,48 +132,76 @@ read-only instance; list only targets you are happy to show.
 The state is about 15 KB per target, a long run of small numbers that
 compresses well: enable compression in the proxy (`encode` below).
 
-## Deploying the read-only demo
+## Deploying
 
-A sketch for a systemd host behind Caddy; adjust paths and names.
+Every zig-fping release carries `fping-watch_<version>_amd64.deb` and
+`_arm64.deb` (built by `package.sh`; checksums in `SHA256SUMS`). The binary is
+static, so the package has no dependencies; it needs a Debian or Ubuntu host
+with systemd.
 
-```ini
-# /etc/systemd/system/fping-watch.service
-[Unit]
-Description=fping-watch demo
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-ExecStart=/usr/local/bin/fping-watch --read-only --listen 127.0.0.1:8080 \
-    --targets /etc/fping-watch/targets.json --history /var/lib/fping-watch/history.json
-DynamicUser=yes
-StateDirectory=fping-watch
-# Only needed where ping_group_range does not cover the service's group.
-AmbientCapabilities=CAP_NET_RAW
-CapabilityBoundingSet=CAP_NET_RAW
-NoNewPrivileges=yes
-ProtectSystem=strict
-ProtectHome=yes
-PrivateTmp=yes
-Restart=on-failure
-
-[Install]
-WantedBy=multi-user.target
+```sh
+apt install ./fping-watch_1.0.0_amd64.deb
 ```
+
+That installs and starts `fping-watch.service`, read-only, on
+`127.0.0.1:8080`:
+
+| path | |
+|---|---|
+| `/usr/bin/fping-watch` | the binary |
+| `/usr/lib/systemd/system/fping-watch.service` | the service ([deploy/fping-watch.service](deploy/fping-watch.service)) |
+| `/etc/fping-watch/targets.json` | the target list; the bundled default is copied there on first install only, then it is yours (not a conffile: upgrades never ask about it) |
+| `/etc/fping-watch/env` | optional, `FPING_WATCH_LISTEN=ADDR:PORT` |
+| `/var/lib/fping-watch/history.json` | the history (systemd `StateDirectory`) |
+| `/usr/share/fping-watch/Caddyfile` | a Caddy site to start from ([deploy/Caddyfile](deploy/Caddyfile)) |
+
+After changing the targets or the env file: `systemctl restart fping-watch`.
+`apt remove` keeps the configuration and history, `apt purge` deletes them.
+
+The service runs as a throwaway user (`DynamicUser`) that can write only its
+state directory, under a strict sandbox: seccomp `@system-service`, IPv4/IPv6
+sockets only, no writable-executable memory, read-only system, `TasksMax`
+and `MemoryMax` (`systemd-analyze security fping-watch`: 1.6, "OK"). ICMP uses
+unprivileged ping sockets where `net.ipv4.ping_group_range` covers the
+service's group (the Debian and Ubuntu default), raw sockets through
+`CAP_NET_RAW` otherwise.
+
+With Ansible the whole deployment is a package, two files and a check:
+
+```yaml
+- name: fping-watch package
+  ansible.builtin.apt:
+    deb: https://github.com/zaxified/zig-fping/releases/download/vX.Y.Z/fping-watch_1.0.0_amd64.deb
+- name: fping-watch targets
+  ansible.builtin.copy: { src: targets.json, dest: /etc/fping-watch/targets.json, mode: "0644" }
+  notify: restart fping-watch
+- name: fping-watch listen address
+  ansible.builtin.copy: { content: "FPING_WATCH_LISTEN=127.0.0.1:8080\n", dest: /etc/fping-watch/env, mode: "0644" }
+  notify: restart fping-watch
+- name: fping-watch is healthy
+  ansible.builtin.uri: { url: "http://127.0.0.1:8080/healthz" }
+  register: health
+  until: health.status == 200
+  retries: 10
+  delay: 2
+```
+
+Then publish it through the reverse proxy, compressed:
 
 ```caddyfile
 ping.example.org {
-    encode zstd gzip
-    reverse_proxy 127.0.0.1:8080
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:8080
 }
 ```
 
 ## Tests
 
 ```sh
-zig build test     # unit tests: status, acknowledgement, history ring, validation
-sh smoke.sh        # end to end: loopback targets, API, read-only mode
+zig build test     # unit tests: status, acknowledgement, history ring, cache, health, validation
+sh smoke.sh        # end to end: loopback targets, API, ETag, health, deadline, read-only mode
+./package.sh       # the .deb packages; smoke-tests the packaged binary first
 ```
 
-Inside the repository `scripts/test.sh` runs both, the smoke test in an
-isolated network namespace.
+Inside the repository `scripts/test.sh` runs the first two, the smoke test in
+an isolated network namespace; `scripts/release.sh` runs `package.sh`.

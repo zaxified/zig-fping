@@ -54,8 +54,14 @@ status() {
     [ "$got" = "$1" ] || fail "$2 $3: HTTP $got, expected $1 ($(cat body))"
 }
 
+"$BIN" --version | grep -q '^fping-watch [0-9]' || fail "--version"
+"$BIN" --targets missing.json >log 2>&1 && fail "started without a target list"
+grep -q 'cannot load the targets from missing.json: FileNotFound' log || fail "startup error message: $(cat log)"
+
 start
 curl -sf "$URL/app.js" >/dev/null || fail "app.js"
+curl -sf "$URL/favicon.svg" | grep -q '<svg' || fail "favicon.svg"
+curl -sf "$URL/healthz" | grep -q '"ok":true' || fail "not healthy at start"
 curl -sI "$URL/" | grep -qi '^content-security-policy:' || fail "no CSP header"
 # A client that connects and sends nothing is cut off at the connection
 # deadline (10 s); checked at the end, it runs while the cycle completes.

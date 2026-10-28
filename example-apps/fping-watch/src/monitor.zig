@@ -102,6 +102,11 @@ pub const Monitor = struct {
     /// The last `stateJson` result and its tag, shared by every viewer.
     state_cache: std.ArrayList(u8) = .empty,
     cache_tag: ?StateTag = null,
+    /// For `health()`, read without the lock: when `loop` started, when the
+    /// last cycle finished (0: none yet), and whether its probing worked.
+    started_at: std.atomic.Value(i64) = .init(0),
+    cycle_done_at: std.atomic.Value(i64) = .init(0),
+    probing_ok: std.atomic.Value(bool) = .init(true),
 
     pub fn deinit(m: *Monitor) void {
         for (m.targets.items) |t| m.freeTarget(t);
@@ -189,13 +194,27 @@ pub const Monitor = struct {
 
     /// Probe forever, one cycle per `cycle_s`, aligned to the wall clock.
     pub fn loop(m: *Monitor) Io.Cancelable!void {
+        m.started_at.store(Io.Clock.real.now(m.io).toSeconds(), .monotonic);
         while (true) {
             const now = Io.Clock.real.now(m.io).toSeconds();
             const start = now - @mod(now, m.cycle_s);
             m.runCycle(start);
             const after = Io.Clock.real.now(m.io).toSeconds();
+            m.cycle_done_at.store(after, .monotonic);
             try m.io.sleep(.fromSeconds(@max(1, start + m.cycle_s - after)), .awake);
         }
+    }
+
+    pub const Health = struct { ok: bool, probing_ok: bool, last_cycle: i64 };
+
+    /// Healthy while cycles keep finishing (at most `3 * cycle_s` apart,
+    /// counted from the start before the first one) and the last one could
+    /// open its ICMP socket. Unreachable targets do not make it unhealthy.
+    pub fn health(m: *Monitor, now: i64) Health {
+        const done = m.cycle_done_at.load(.monotonic);
+        const since = if (done == 0) m.started_at.load(.monotonic) else done;
+        const probing_ok = m.probing_ok.load(.monotonic);
+        return .{ .ok = probing_ok and now - since <= 3 * m.cycle_s, .probing_ok = probing_ok, .last_cycle = done };
     }
 
     /// One probing cycle. `t` is the cycle's start (unix seconds).
@@ -227,12 +246,15 @@ pub const Monitor = struct {
         }
 
         // 3. Ping every resolved target in one paced round.
-        probe(m.gpa, jobs) catch |err| {
+        if (probe(m.gpa, jobs)) {
+            m.probing_ok.store(true, .monotonic);
+        } else |err| {
             log.err("probing failed: {t}", .{err});
+            m.probing_ok.store(false, .monotonic);
             for (jobs) |*job| if (job.err == null) {
                 job.err = "cannot open ICMP socket";
             };
-        };
+        }
 
         // 4. Record the results; a target may have been removed meanwhile.
         m.mutex.lockUncancelable(m.io);
@@ -641,6 +663,19 @@ test "the state is built once per change and shared" {
     try testing.expectEqual('{', second.json[0]);
     m.state_cache.items[0] = 'X';
     try testing.expectEqual('X', (try m.stateJson(arena)).json[0]);
+}
+
+test "health: cycles must keep finishing and probing must work" {
+    var m = testMonitor();
+    defer m.deinit();
+    m.started_at.store(1000, .monotonic);
+    try testing.expect(m.health(1000 + 3 * 60).ok); // first cycle still running
+    try testing.expect(!m.health(1001 + 3 * 60).ok); // ... for too long
+    m.cycle_done_at.store(2000, .monotonic);
+    try testing.expect(m.health(2000 + 3 * 60).ok);
+    try testing.expect(!m.health(2001 + 3 * 60).ok);
+    m.probing_ok.store(false, .monotonic);
+    try testing.expect(!m.health(2000).ok);
 }
 
 test "names and hosts are validated" {

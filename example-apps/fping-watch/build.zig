@@ -10,13 +10,21 @@ pub fn build(b: *std.Build) void {
     // LLVM unless -Dselfhosted: the self-hosted backend is for the edit loop only.
     const selfhosted = b.option(bool, "selfhosted", "Use Zig's self-hosted backend (edit loop only)") orelse false;
     const use_llvm: ?bool = if (selfhosted) null else true;
+    const strip = b.option(bool, "strip", "Strip debug info (bundle.sh does)");
+
+    const options = b.addOptions();
+    options.addOption([]const u8, "version", @import("build.zig.zon").version);
 
     const fping = b.dependency("zig_fping", .{ .target = target, .optimize = optimize });
     const mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
-        .imports = &.{.{ .name = "zig_fping", .module = fping.module("zig_fping") }},
+        .strip = strip,
+        .imports = &.{
+            .{ .name = "zig_fping", .module = fping.module("zig_fping") },
+            .{ .name = "build_options", .module = options.createModule() },
+        },
     });
 
     const exe = b.addExecutable(.{ .name = "fping-watch", .root_module = mod, .use_llvm = use_llvm });

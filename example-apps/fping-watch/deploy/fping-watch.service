@@ -1,0 +1,58 @@
+# fping-watch, the public read-only demo; shipped in the .deb (package.sh).
+# Local settings belong in /etc/fping-watch/env (FPING_WATCH_LISTEN=ADDR:PORT),
+# the target list in /etc/fping-watch/targets.json; not here.
+[Unit]
+Description=fping-watch ping monitor (read-only demo)
+Documentation=https://github.com/zaxified/zig-fping/tree/main/example-apps/fping-watch
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Environment=FPING_WATCH_LISTEN=127.0.0.1:8080
+EnvironmentFile=-/etc/fping-watch/env
+ExecStart=/usr/bin/fping-watch --read-only --listen ${FPING_WATCH_LISTEN} \
+    --targets /etc/fping-watch/targets.json --history /var/lib/fping-watch/history.json
+Restart=on-failure
+RestartSec=5s
+
+# Identity and files: a throwaway user, writable only /var/lib/fping-watch.
+DynamicUser=yes
+StateDirectory=fping-watch
+WorkingDirectory=/var/lib/fping-watch
+UMask=0077
+
+# ICMP: unprivileged ping sockets where net.ipv4.ping_group_range covers the
+# service's group (the default on Debian and Ubuntu), raw sockets otherwise.
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
+NoNewPrivileges=yes
+
+# Sandbox. The binary is static (no libc) and only needs IP sockets.
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+# Resources: up to 256 connections, one thread each, plus a few.
+TasksMax=512
+MemoryMax=256M
+
+[Install]
+WantedBy=multi-user.target

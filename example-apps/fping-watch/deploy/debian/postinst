@@ -1,0 +1,15 @@
+#!/bin/sh
+# The target list is not a conffile (dpkg would ask on every upgrade where
+# it was edited): the default is copied once, then it belongs to the admin.
+set -e
+if [ "$1" = configure ]; then
+    if [ ! -e /etc/fping-watch/targets.json ]; then
+        install -D -m 0644 /usr/share/fping-watch/targets.json /etc/fping-watch/targets.json
+    fi
+    if [ -d /run/systemd/system ]; then
+        systemctl daemon-reload
+        systemctl enable fping-watch.service >/dev/null 2>&1
+        systemctl restart fping-watch.service
+    fi
+fi
+exit 0
