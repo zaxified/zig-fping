@@ -6,6 +6,7 @@
     { "id": 4, "name": "Google DNS (IPv6)", "host": "2001:4860:4860::8888", "demo": "bufferbloat" },
     { "id": 5, "name": "Quad9 DNS", "host": "9.9.9.9", "demo": "flapping" },
     { "id": 6, "name": "Wikimedia (IPv6)", "host": "2a02:ec80:300:ed1a::1", "demo": "outage" },
-    { "id": 7, "name": "NICT NTP, Tokyo", "host": "133.243.238.243", "demo": "long_haul" }
+    { "id": 7, "name": "NICT NTP, Tokyo", "host": "133.243.238.243", "demo": "long_haul" },
+    { "id": 8, "name": "Branch office VPN", "host": "203.0.113.10", "demo": "down" }
   ]
 }

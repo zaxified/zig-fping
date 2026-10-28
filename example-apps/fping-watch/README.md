@@ -293,6 +293,7 @@ scenario get it:
 | `route_change` | a latency plateau for three hours, 18 to 15 hours ago |
 | `flapping` | bursts of partial loss all day, an 8-minute outage 6 hours ago |
 | `outage` | 20 minutes of rising latency, jitter and loss, then 45 minutes DOWN, recovered 3 hours ago |
+| `down` | the same warning signs, then DOWN from 25 minutes before the live hour: for a target that never answers |
 | `bufferbloat` | a nightly backup 01:00-02:30 UTC: a sawtooth of queueing delay |
 | `long_haul` | a distant host: more jitter, busier 10-14 UTC |
 
@@ -301,7 +302,9 @@ the live hour, and is drawn from the target and the minute: the same minute
 looks the same after the next refill. Live probing stays real, so choose
 targets that answer. The package ships a list of public IPv4 and IPv6
 targets with one scenario each, `/usr/share/fping-watch/demo-targets.json`
-(`FPING_WATCH_TARGETS` can point at it directly).
+(`FPING_WATCH_TARGETS` can point at it directly); its DOWN target is in
+203.0.113.0/24, a range reserved for documentation (RFC 5737) that never
+answers.
 
 ## About page
 

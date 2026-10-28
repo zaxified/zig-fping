@@ -25,6 +25,9 @@ pub const Scenario = enum {
     /// 20 minutes of warning signs (latency, jitter, loss), then 45 minutes
     /// DOWN, recovered 3 hours ago.
     outage,
+    /// The same warning signs, then DOWN from 25 minutes before the real
+    /// data on: for a target that never answers, so it stays DOWN live.
+    down,
     /// A nightly backup 01:00-02:30 UTC saturates the link: a sawtooth of
     /// queueing delay.
     bufferbloat,
@@ -57,12 +60,8 @@ pub fn probes(s: Scenario, id: u32, t: i64, base_ms: f64, live_from: i64, out: [
             .{ .base = b, .spread = 0.1 * b + 1, .loss = 0.25 }
         else
             .{ .base = b, .spread = 0.05 * b + 0.5, .loss = 0.004 },
-        .outage => if (ago_h >= 3 and ago_h < 3.75)
-            .{ .base = b, .spread = calm.spread, .loss = 1 }
-        else if (ago_h >= 3.75 and ago_h < 3.75 + 20.0 / 60.0) blk: {
-            const x = (3.75 + 20.0 / 60.0 - ago_h) / (20.0 / 60.0); // 0..1 towards the outage
-            break :blk .{ .base = b + 5 * @max(b, 20) * x * x, .spread = calm.spread + @max(b, 20) * x, .loss = 0.05 + 0.6 * x };
-        } else calm,
+        .outage => outage(calm, ago_h, 3, 3.75),
+        .down => outage(calm, ago_h, -1e9, 25.0 / 60.0),
         .bufferbloat => if (day_h >= 1 and day_h < 2.5) blk: {
             const saw = @mod((day_h - 1) * 60, 12) / 12; // a 12-minute sawtooth
             break :blk .{ .base = b + 4 + 36 * saw, .spread = 3 + 6 * saw, .loss = 0.01 };
@@ -82,6 +81,17 @@ pub fn probes(s: Scenario, id: u32, t: i64, base_ms: f64, live_from: i64, out: [
         n += 1;
     }
     return n;
+}
+
+/// DOWN from `from_h` to `to_h` hours before the real data, preceded by 20
+/// minutes of rising latency, jitter and loss.
+fn outage(calm: Draw, ago_h: f64, from_h: f64, to_h: f64) Draw {
+    const warn_h = 20.0 / 60.0;
+    if (ago_h >= from_h and ago_h < to_h) return .{ .base = calm.base, .spread = calm.spread, .loss = 1 };
+    if (ago_h < to_h or ago_h >= to_h + warn_h) return calm;
+    const x = (to_h + warn_h - ago_h) / warn_h; // 0..1 towards the outage
+    const b = @max(calm.base, 20);
+    return .{ .base = calm.base + 5 * b * x * x, .spread = calm.spread + b * x, .loss = 0.05 + 0.6 * x };
 }
 
 const Draw = struct {
@@ -108,6 +118,10 @@ test "scenarios happen where they are placed" {
     var out: [5]u32 = undefined;
     // outage: DOWN 3 to 3.75 hours before the real data, fine afterwards.
     try testing.expectEqual(0, probes(.outage, 1, live - 3 * 3600 - 600, 30, live, &out));
+    // down: DOWN right up to the real data, fine a day before.
+    try testing.expectEqual(0, probes(.down, 1, live - 60, 30, live, &out));
+    try testing.expectEqual(0, probes(.down, 1, live - 20 * 60, 30, live, &out));
+    try testing.expect(probes(.down, 1, live - 20 * 3600, 30, live, &out) > 0);
     // route change: a plateau 18 to 15 hours before.
     var plateau: u64 = 0;
     var normal: u64 = 0;
