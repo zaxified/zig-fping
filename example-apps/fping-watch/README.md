@@ -73,7 +73,7 @@ not the expected one is shown as "no data".
 
 | | |
 |---|---|
-| `GET /api/state` | everything the page shows: per target status, flags and the 24 h series `rtt` (ms) and `loss` (%), one entry per cycle, oldest first, `null` = no data |
+| `GET /api/state` | everything the page shows: per target status, flags and the 24 h series `rtt` (ms) and `loss` (%), one entry per cycle, oldest first, `null` = no data; carries an ETag, `If-None-Match` gets `304` until the state changes |
 | `POST /api/targets` | add: `{"name": "...", "host": "..."}` |
 | `DELETE /api/targets/ID` | remove |
 | `POST /api/targets/ID/pause`, `/resume` | stop and resume probing |
@@ -88,11 +88,42 @@ another site cannot change the targets behind your back.
 - **No authentication.** Without `--read-only`, anyone who reaches the port can
   change the targets. The default address is loopback; put a reverse proxy with
   authentication in front, or run the public instance read-only.
-- **One request per connection, no timeouts.** Each connection is served on its
-  own thread and closed after one response. A reverse proxy in front provides
-  keep-alive, TLS and timeouts.
+- **One request per connection, no TLS.** Each connection is served on its own
+  thread and closed after one response. A reverse proxy in front provides
+  keep-alive, TLS, compression and per-client rate limits.
 - **At most 64 targets**, one address per name (the first one DNS returns).
 - History is saved as JSON after every cycle (about 400 KB for 10 targets).
+
+## Many viewers, and the open internet
+
+Viewers only read: probing runs on its own schedule, and no request ever
+sends a ping, however many people have the page open.
+
+- **One serialization per change.** The state JSON is built once per cycle
+  (or target change) and served to every viewer from a cache. The page polls
+  every 15 s with `If-None-Match`, so most polls are a body-less `304`; a
+  background tab does not poll at all. Measured with 64 targets (a 930 KB
+  state): 50 concurrent clients, 2000 full responses in 3.4 s, 12 threads,
+  7 MB RSS.
+- **Bounded connections.** At most 256 at once (more are closed unanswered),
+  each shut down 10 s after it was accepted, so a client that never finishes
+  its request cannot hold a thread for longer. A flood of idle connections
+  still fills the 256 slots for as long as it lasts; that is what the
+  reverse proxy's per-client limits are for.
+- **Nothing to change, nothing to read.** `--read-only` refuses every write
+  in the server, not just in the page; the routes are a fixed list (no file
+  serving, no path handling); every string reaches the page through
+  `textContent`, under a CSP without inline script.
+
+Without `--read-only`, anyone who reaches the server can make it ping
+addresses of their choice, including ones on your internal network, and read
+which ones answer. Never expose a writable instance.
+
+Everything in `targets.json` (names *and* host addresses) is public on a
+read-only instance; list only targets you are happy to show.
+
+The state is about 15 KB per target, a long run of small numbers that
+compresses well: enable compression in the proxy (`encode` below).
 
 ## Deploying the read-only demo
 
@@ -125,6 +156,7 @@ WantedBy=multi-user.target
 
 ```caddyfile
 ping.example.org {
+    encode zstd gzip
     reverse_proxy 127.0.0.1:8080
 }
 ```

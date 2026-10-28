@@ -72,6 +72,14 @@ pub const Target = struct {
 
 pub const Error = error{ InvalidName, InvalidHost, TooManyTargets, UnknownTarget, NotDown };
 
+/// Identifies one version of the web state; the HTTP layer turns it into
+/// an ETag, so a viewer polling between cycles gets `304 Not Modified`.
+pub const StateTag = struct {
+    version: u64,
+    /// Start (unix seconds) of the newest cycle in the series.
+    end: i64,
+};
+
 /// Upper bound on targets: this is a small demo, not a monitoring system.
 pub const max_targets = 64;
 
@@ -88,10 +96,17 @@ pub const Monitor = struct {
     /// history in memory only.
     history_path: ?[]const u8 = null,
     read_only: bool = false,
+    /// Bumped on every change the web page would show; with the cycle start
+    /// it identifies one `stateJson` result (see `StateTag`).
+    version: u64 = 0,
+    /// The last `stateJson` result and its tag, shared by every viewer.
+    state_cache: std.ArrayList(u8) = .empty,
+    cache_tag: ?StateTag = null,
 
     pub fn deinit(m: *Monitor) void {
         for (m.targets.items) |t| m.freeTarget(t);
         m.targets.deinit(m.gpa);
+        m.state_cache.deinit(m.gpa);
     }
 
     fn freeTarget(m: *Monitor, t: *Target) void {
@@ -117,6 +132,7 @@ pub const Monitor = struct {
         m.mutex.lockUncancelable(m.io);
         defer m.mutex.unlock(m.io);
         const id = try m.addLocked(m.next_id, name, host);
+        m.version += 1;
         m.saveConfigLocked();
         return id;
     }
@@ -140,6 +156,7 @@ pub const Monitor = struct {
         defer m.mutex.unlock(m.io);
         const i = m.find(id) orelse return error.UnknownTarget;
         m.freeTarget(m.targets.orderedRemove(i));
+        m.version += 1;
         m.saveConfigLocked();
     }
 
@@ -164,6 +181,7 @@ pub const Monitor = struct {
             },
             .unack => t.acked = false,
         }
+        m.version += 1;
         m.saveConfigLocked();
     }
 
@@ -223,6 +241,7 @@ pub const Monitor = struct {
             const i = m.find(job.id) orelse continue;
             m.recordLocked(m.targets.items[i], t, job);
         }
+        m.version += 1;
         m.saveHistoryLocked();
     }
 
@@ -363,14 +382,42 @@ pub const Monitor = struct {
 
     // ----- web API --------------------------------------------------------------
 
-    /// Everything the page shows, as JSON. Per target, `rtt` (ms) and `loss`
-    /// (%) hold one entry per cycle of the last 24 hours, oldest first;
-    /// `null` where there is no sample.
-    pub fn writeState(m: *Monitor, w: *Io.Writer) Io.Writer.Error!void {
+    /// The tag of the current state: it changes when a cycle is recorded,
+    /// a target changes or a new cycle starts (the series shift by one), and
+    /// at no other time.
+    pub fn stateTag(m: *Monitor) StateTag {
         m.mutex.lockUncancelable(m.io);
         defer m.mutex.unlock(m.io);
+        return m.stateTagLocked();
+    }
+
+    fn stateTagLocked(m: *Monitor) StateTag {
         const now = Io.Clock.real.now(m.io).toSeconds();
-        const newest = now - @mod(now, m.cycle_s);
+        return .{ .version = m.version, .end = now - @mod(now, m.cycle_s) };
+    }
+
+    /// Everything the page shows, as JSON (see `writeStateLocked`), copied
+    /// into `arena`. Built once per tag and then served from `state_cache`,
+    /// so any number of viewers costs one serialization per change.
+    pub fn stateJson(m: *Monitor, arena: std.mem.Allocator) error{OutOfMemory}!struct { tag: StateTag, json: []u8 } {
+        m.mutex.lockUncancelable(m.io);
+        defer m.mutex.unlock(m.io);
+        const tag = m.stateTagLocked();
+        if (!std.meta.eql(m.cache_tag, tag)) {
+            m.cache_tag = null;
+            m.state_cache.clearRetainingCapacity();
+            var aw: Io.Writer.Allocating = .fromArrayList(m.gpa, &m.state_cache);
+            defer m.state_cache = aw.toArrayList();
+            m.writeStateLocked(&aw.writer, tag.end) catch return error.OutOfMemory;
+            m.cache_tag = tag;
+        }
+        return .{ .tag = tag, .json = try arena.dupe(u8, m.state_cache.items) };
+    }
+
+    /// Per target, `rtt` (ms) and `loss` (%) hold one entry per cycle of the
+    /// last 24 hours, oldest first, the newest at cycle start `newest`;
+    /// `null` where there is no sample.
+    fn writeStateLocked(m: *Monitor, w: *Io.Writer, newest: i64) Io.Writer.Error!void {
         try w.print(
             "{{\"read_only\":{},\"cycle_s\":{d},\"probes\":{d},\"ack_clear_after\":{d},\"end\":{d},\"targets\":[",
             .{ m.read_only, m.cycle_s, probes_per_cycle, ack_clear_after, newest },
@@ -573,6 +620,27 @@ test "history keeps 24 hours and reports gaps as null" {
     defer aw.deinit();
     try m.writeSeries(&aw.writer, t, t0 + history_len * 60, .loss);
     try testing.expect(std.mem.endsWith(u8, aw.written(), "null,null,20"));
+}
+
+test "the state is built once per change and shared" {
+    var m = testMonitor();
+    defer m.deinit();
+    m.cycle_s = 1 << 30; // no cycle boundary (which changes the tag) during the test
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const id = try m.add("a", "192.0.2.1");
+    const first = try m.stateJson(arena);
+    try testing.expectEqual(first.tag, m.stateTag());
+    try m.apply(id, .pause);
+    try testing.expect(m.stateTag().version != first.tag.version);
+    // Rebuilt from the cache only when the tag changed: corrupt the cache to see.
+    m.state_cache.items[0] = 'X';
+    const second = try m.stateJson(arena);
+    try testing.expect(std.mem.find(u8, second.json, "\"paused\":true") != null);
+    try testing.expectEqual('{', second.json[0]);
+    m.state_cache.items[0] = 'X';
+    try testing.expectEqual('X', (try m.stateJson(arena)).json[0]);
 }
 
 test "names and hosts are validated" {

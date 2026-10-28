@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### fping-watch: ready for a public read-only instance
+
+- Many viewers cost one serialization per change: `/api/state` is built once
+  per state version (a recorded cycle, a target change, a new cycle start)
+  and served from a cache, with an ETag; a poll that finds nothing new is
+  answered `304 Not Modified` without a body. The page revalidates instead
+  of refetching, skips redrawing on an unchanged ETag and stops polling in a
+  background tab. Viewers never trigger probing (that was already so).
+- Bounded connections: at most 256 at once (more are closed unanswered), and
+  each is shut down 10 s after it was accepted. Before, a client that never
+  finished its request held a thread forever, the thread count was
+  unbounded, and when no thread could be started the accept loop served the
+  connection itself, so one idle client stopped the server.
+
 ### Pending upstream (deferred)
 
 To be implemented once the change reaches an upstream release tag

@@ -9,6 +9,7 @@ const std = @import("std");
 const Io = std.Io;
 const http = std.http;
 const Monitor = @import("monitor.zig").Monitor;
+const StateTag = @import("monitor.zig").StateTag;
 
 const log = std.log.scoped(.web);
 
@@ -65,19 +66,88 @@ pub fn main(init: std.process.Init) !void {
         listen_text, monitor.targets.items.len, if (monitor.read_only) ", read-only" else "",
     });
 
-    // The probing loop and every connection run concurrently; with the
-    // default threaded Io each one is its own thread.
+    // The probing loop, the reaper and every connection run concurrently;
+    // with the default threaded Io each one is its own thread. Requests only
+    // read what the probing loop recorded: no viewer ever triggers a ping.
+    var connections: Connections = .{};
     var tasks: Io.Group = .init;
     defer tasks.cancel(io);
     try tasks.concurrent(io, probeLoop, .{&monitor});
+    try tasks.concurrent(io, Connections.reap, .{ &connections, io });
     while (true) {
         const stream = server.accept(io) catch |err| {
             log.warn("accept: {t}", .{err});
             continue;
         };
-        tasks.concurrent(io, serve, .{ &monitor, stream }) catch serve(&monitor, stream);
+        const slot = connections.acquire(io, stream) orelse {
+            stream.close(io); // full: drop it rather than queue behind slow clients
+            continue;
+        };
+        tasks.concurrent(io, serve, .{ &monitor, &connections, slot, stream }) catch
+            connections.release(io, slot);
     }
 }
+
+/// Limits for a server reachable from the internet. Every connection holds
+/// a thread, so connections are bounded twice: at most `max_connections` at
+/// once (more are closed unanswered), and each one is shut down
+/// `connection_deadline_s` after it was accepted, whatever the client does.
+/// Without the deadline a client that sends its request a byte at a time,
+/// or never, holds its thread forever. Per-client rate limits belong in the
+/// reverse proxy, which sees the client addresses.
+const max_connections = 256;
+const connection_deadline_s = 10;
+
+const Connections = struct {
+    mutex: Io.Mutex = .init,
+    slots: [max_connections]Slot = @splat(.{}),
+
+    const Slot = struct { stream: ?Io.net.Stream = null, deadline: i64 = 0 };
+
+    fn now(io: Io) i64 {
+        return Io.Clock.awake.now(io).toSeconds();
+    }
+
+    /// A free slot, now holding `stream`; null when every slot is taken.
+    fn acquire(c: *Connections, io: Io, stream: Io.net.Stream) ?usize {
+        c.mutex.lockUncancelable(io);
+        defer c.mutex.unlock(io);
+        for (&c.slots, 0..) |*s, i| if (s.stream == null) {
+            s.* = .{ .stream = stream, .deadline = now(io) + connection_deadline_s };
+            return i;
+        };
+        return null;
+    }
+
+    /// Frees the slot and closes its stream. The slot is cleared first,
+    /// under the lock, so `reap` never shuts down a reused descriptor.
+    fn release(c: *Connections, io: Io, i: usize) void {
+        const stream = blk: {
+            c.mutex.lockUncancelable(io);
+            defer c.mutex.unlock(io);
+            const stream = c.slots[i].stream.?;
+            c.slots[i].stream = null;
+            break :blk stream;
+        };
+        stream.close(io);
+    }
+
+    /// Once a second, shuts down every connection past its deadline; the
+    /// thread serving it then reads end of stream (or fails to write) and
+    /// finishes.
+    fn reap(c: *Connections, io: Io) Io.Cancelable!void {
+        while (true) {
+            try io.sleep(.fromSeconds(1), .awake);
+            c.mutex.lockUncancelable(io);
+            defer c.mutex.unlock(io);
+            const t = now(io);
+            for (&c.slots) |*s| if (s.stream) |stream| if (t >= s.deadline) {
+                stream.shutdown(io, .both) catch {};
+                s.deadline = std.math.maxInt(i64);
+            };
+        }
+    }
+};
 
 fn fail(io: Io, msg: []const u8) error{InvalidArguments} {
     var buf: [1024]u8 = undefined;
@@ -104,15 +174,14 @@ const security_headers = [_]http.Header{
     .{ .name = "content-security-policy", .value = "default-src 'self'; frame-ancestors 'none'" },
     .{ .name = "x-content-type-options", .value = "nosniff" },
     .{ .name = "referrer-policy", .value = "no-referrer" },
-    .{ .name = "cache-control", .value = "no-store" },
 };
 
 /// One request per connection: a slow or idle client then holds a thread
 /// only for one request, and the code stays simple. Put a reverse proxy in
-/// front for keep-alive, TLS and timeouts.
-fn serve(monitor: *Monitor, stream: Io.net.Stream) void {
+/// front for keep-alive and TLS.
+fn serve(monitor: *Monitor, connections: *Connections, slot: usize, stream: Io.net.Stream) void {
     const io = monitor.io;
-    defer stream.close(io);
+    defer connections.release(io, slot);
     var recv_buf: [8 * 1024]u8 = undefined;
     var send_buf: [16 * 1024]u8 = undefined;
     var reader = stream.reader(io, &recv_buf);
@@ -134,11 +203,7 @@ fn route(monitor: *Monitor, req: *http.Server.Request, arena: std.mem.Allocator)
         if (std.mem.eql(u8, path, "/")) return send(req, .ok, "text/html; charset=utf-8", index_html);
         if (std.mem.eql(u8, path, "/app.js")) return send(req, .ok, "text/javascript", app_js);
         if (std.mem.eql(u8, path, "/style.css")) return send(req, .ok, "text/css", style_css);
-        if (std.mem.eql(u8, path, "/api/state")) {
-            var aw: Io.Writer.Allocating = .init(arena);
-            try monitor.writeState(&aw.writer);
-            return send(req, .ok, "application/json", aw.written());
-        }
+        if (std.mem.eql(u8, path, "/api/state")) return sendState(monitor, req, arena);
         return sendError(req, .not_found, "not found");
     }
 
@@ -186,11 +251,75 @@ fn readBody(req: *http.Server.Request, arena: std.mem.Allocator) ![]u8 {
     return reader.allocRemaining(arena, .limited(4096));
 }
 
+/// GET /api/state. The page polls more often than a cycle runs; the ETag
+/// lets a poll that finds nothing new end as `304 Not Modified`, no body.
+fn sendState(monitor: *Monitor, req: *http.Server.Request, arena: std.mem.Allocator) !void {
+    var buf: [64]u8 = undefined;
+    const current = etagOf(&buf, monitor.stateTag());
+    if (ifNoneMatch(req, current))
+        return respond(req, "", .{ .status = .not_modified, .cache_control = "no-cache", .etag = current });
+    const state = try monitor.stateJson(arena);
+    return respond(req, state.json, .{
+        .content_type = "application/json",
+        .cache_control = "no-cache",
+        .etag = etagOf(&buf, state.tag),
+    });
+}
+
+fn etagOf(buf: *[64]u8, tag: StateTag) []const u8 {
+    return std.mem.print(buf, "\"{d}-{d}\"", .{ tag.version, tag.end }) catch unreachable;
+}
+
+/// Whether an If-None-Match header lists `etag`. Also accepted: the weak
+/// form and a suffix after the tag (`"1-2-gzip"`), as a compressing proxy
+/// may rewrite the ETag it passes on.
+fn ifNoneMatch(req: *const http.Server.Request, etag: []const u8) bool {
+    const bare = etag[1 .. etag.len - 1];
+    var headers = req.iterateHeaders();
+    while (headers.next()) |h| {
+        if (!std.ascii.eqlIgnoreCase(h.name, "if-none-match")) continue;
+        var tags = std.mem.tokenizeAny(u8, h.value, ", ");
+        while (tags.next()) |raw| {
+            const t = std.mem.trim(u8, if (std.mem.startsWith(u8, raw, "W/")) raw[2..] else raw, "\"");
+            if (std.mem.eql(u8, t, bare)) return true;
+            if (std.mem.startsWith(u8, t, bare) and t[bare.len] == '-') return true;
+        }
+    }
+    return false;
+}
+
+const Response = struct {
+    status: http.Status = .ok,
+    content_type: ?[]const u8 = null,
+    cache_control: []const u8 = "no-store",
+    etag: ?[]const u8 = null,
+};
+
+fn respond(req: *http.Server.Request, body: []const u8, r: Response) !void {
+    var headers: [security_headers.len + 3]http.Header = undefined;
+    @memcpy(headers[0..security_headers.len], &security_headers);
+    var n: usize = security_headers.len;
+    headers[n] = .{ .name = "cache-control", .value = r.cache_control };
+    n += 1;
+    if (r.content_type) |v| {
+        headers[n] = .{ .name = "content-type", .value = v };
+        n += 1;
+    }
+    if (r.etag) |v| {
+        headers[n] = .{ .name = "etag", .value = v };
+        n += 1;
+    }
+    try req.respond(body, .{
+        .status = r.status,
+        .keep_alive = false,
+        // A 304 must not claim a content length of 0.
+        .transfer_encoding = if (r.status == .not_modified) .none else null,
+        .extra_headers = headers[0..n],
+    });
+}
+
 fn send(req: *http.Server.Request, status: http.Status, content_type: []const u8, body: []const u8) !void {
-    var headers: [security_headers.len + 1]http.Header = undefined;
-    headers[0] = .{ .name = "content-type", .value = content_type };
-    @memcpy(headers[1..], &security_headers);
-    try req.respond(body, .{ .status = status, .keep_alive = false, .extra_headers = &headers });
+    return respond(req, body, .{ .status = status, .content_type = content_type });
 }
 
 fn sendError(req: *http.Server.Request, status: http.Status, msg: []const u8) !void {

@@ -56,12 +56,20 @@ function summarize(t) {
 
 // ----- API -------------------------------------------------------------------
 
+let etag = null;
+
 async function load() {
   try {
-    const res = await fetch("api/state", { cache: "no-store" });
+    // "no-cache": the browser revalidates with If-None-Match, and the server
+    // answers 304 until the next cycle; nothing new means nothing to redraw.
+    const res = await fetch("api/state", { cache: "no-cache" });
     if (!res.ok) throw new Error(res.statusText);
-    state = await res.json();
-    render();
+    const tag = res.headers.get("etag");
+    if (tag === null || tag !== etag) {
+      state = await res.json();
+      etag = tag;
+      render();
+    }
     $("#updated").textContent = `Updated ${new Date().toLocaleTimeString()}`;
   } catch (err) {
     $("#updated").textContent = `Cannot reach the server (${err.message}), retrying…`;
@@ -281,5 +289,7 @@ window.addEventListener("resize", () => {
   resizeTimer = setTimeout(() => state && render(), 150);
 });
 
+// A background tab does not poll; it catches up when shown again.
 load();
-setInterval(load, REFRESH_MS);
+setInterval(() => document.hidden || load(), REFRESH_MS);
+document.addEventListener("visibilitychange", () => document.hidden || load());

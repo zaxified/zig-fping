@@ -57,6 +57,11 @@ status() {
 start
 curl -sf "$URL/app.js" >/dev/null || fail "app.js"
 curl -sI "$URL/" | grep -qi '^content-security-policy:' || fail "no CSP header"
+# A client that connects and sends nothing is cut off at the connection
+# deadline (10 s); checked at the end, it runs while the cycle completes.
+date +%s > idle.start
+(timeout 20 nc -d 127.0.0.1 $PORT >/dev/null 2>&1; date +%s > idle.end) &
+IDLE=$!
 
 # Wait for the first cycle (5 probes at 1 s per host + 1 s timeout).
 i=0
@@ -67,9 +72,20 @@ STATE=$(curl -sf "$URL/api/state")
 echo "$STATE" | grep -q '"name":"lo4"[^}]*"status":"up"' || fail "127.0.0.1 not up"
 echo "$STATE" | grep -q '"name":"lo6"[^}]*"status":"up"' || fail "::1 not up"
 
+# Polling with the ETag costs a body-less 304 until the state changes (a
+# cycle may complete between the two requests: retry).
+etag() { curl -sfI "$URL/api/state" | tr -d '\r' | sed -n 's/^etag: //Ip'; }
+revalidate() { curl -s -o /dev/null -w '%{http_code}' -H "if-none-match: $1" "$URL/api/state"; }
+i=0
+until [ "$(revalidate "$(etag)")" = 304 ]; do
+    i=$((i + 1)); [ $i -lt 3 ] || fail "revalidation with the current ETag is not 304"
+done
+ETAG=$(etag)
+
 status 409 POST /api/targets/1/ack                 # only DOWN can be acknowledged
 status 200 POST /api/targets/3/ack
 status 200 POST /api/targets/2/pause
+[ "$(revalidate "$ETAG")" = 200 ] || fail "a change does not change the ETag"
 status 400 POST /api/targets '{"name":"x","host":"no such host!"}'
 status 201 POST /api/targets '{"name":"added","host":"127.0.0.2"}'
 status 200 DELETE /api/targets/4
@@ -79,6 +95,9 @@ got=$(curl -s -o /dev/null -w '%{http_code}' -X POST -d 'x=1' "$URL/api/targets/
 [ "$got" = 415 ] || fail "form post: HTTP $got, expected 415"
 grep -q '"paused": true' targets.json || fail "pause not saved"
 grep -q '"acked": true' targets.json || fail "ack not saved"
+wait "$IDLE"
+idle=$(( $(cat idle.end) - $(cat idle.start) ))
+[ "$idle" -ge 9 ] && [ "$idle" -le 13 ] || fail "idle connection closed after ${idle} s, expected ~10 s"
 stop
 
 # Read-only: history survives the restart, every change is refused.
