@@ -312,7 +312,12 @@ pub const Monitor = struct {
     };
 
     pub fn loadConfig(m: *Monitor) !void {
-        const bytes = try Io.Dir.cwd().readFileAlloc(m.io, m.config_path, m.gpa, .limited(1 << 20));
+        const bytes = Io.Dir.cwd().readFileAlloc(m.io, m.config_path, m.gpa, .limited(1 << 20)) catch |err| switch (err) {
+            // A writable instance starts empty and writes the file on the
+            // first change; a read-only one would show nothing, forever.
+            error.FileNotFound => if (m.read_only) return err else return,
+            else => return err,
+        };
         defer m.gpa.free(bytes);
         const parsed = try std.json.parseFromSlice(ConfigFile, m.gpa, bytes, .{});
         defer parsed.deinit();
@@ -359,7 +364,19 @@ pub const Monitor = struct {
             else => return err,
         };
         defer m.gpa.free(bytes);
-        const parsed = try std.json.parseFromSlice(HistoryFile, m.gpa, bytes, .{});
+        // The history is only nice to have: an unreadable file is moved
+        // aside rather than keeping the daemon from starting (a restart
+        // loop under systemd until someone notices).
+        const parsed = std.json.parseFromSlice(HistoryFile, m.gpa, bytes, .{}) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => {
+                var bad_buf: [Io.Dir.max_path_bytes]u8 = undefined;
+                const bad = try std.mem.print(&bad_buf, "{s}.bad", .{path});
+                try Io.Dir.rename(.cwd(), path, .cwd(), bad, m.io);
+                log.warn("{s} is not a valid history ({t}), moved to {s}; starting without history", .{ path, err, bad });
+                return;
+            },
+        };
         defer parsed.deinit();
         if (parsed.value.cycle_s != m.cycle_s) return; // slots would not line up
         const oldest = Io.Clock.real.now(m.io).toSeconds() - history_len * m.cycle_s;
@@ -375,6 +392,8 @@ pub const Monitor = struct {
                     .recv = std.math.cast(u8, s[2]) orelse continue,
                     .rtt_us = std.math.cast(u32, s[3]) orelse continue,
                 };
+                // writeSeries computes `sent - recv`.
+                if (sample.sent > probes_per_cycle or sample.recv > sample.sent) continue;
                 t.history[m.slot(sample.t)] = sample;
                 if (sample.t > t.last.t) t.last = sample;
             }
@@ -493,11 +512,15 @@ fn validateHost(host: []const u8) Error!void {
     _ = Io.net.HostName.init(host) catch return error.InvalidHost;
 }
 
+/// A temporary file next to `path`, synced to disk before it is renamed
+/// over `path`: a crash or power loss leaves the old or the new content,
+/// never an empty or truncated file.
 fn writeFileAtomic(io: Io, path: []const u8, data: []const u8) !void {
-    var tmp_buf: [Io.Dir.max_path_bytes]u8 = undefined;
-    const tmp = try std.mem.print(&tmp_buf, "{s}.tmp", .{path});
-    try Io.Dir.cwd().writeFile(io, .{ .sub_path = tmp, .data = data });
-    try Io.Dir.rename(.cwd(), tmp, .cwd(), path, io);
+    var file = try Io.Dir.cwd().createFileAtomic(io, path, .{ .replace = true });
+    defer file.deinit(io);
+    try file.file.writeStreamingAll(io, data);
+    try file.file.sync(io);
+    try file.replace(io);
 }
 
 /// First address of `host`; numeric addresses skip DNS.
@@ -676,6 +699,53 @@ test "health: cycles must keep finishing and probing must work" {
     try testing.expect(!m.health(2001 + 3 * 60).ok);
     m.probing_ok.store(false, .monotonic);
     try testing.expect(!m.health(2000).ok);
+}
+
+test "persistence: missing target list, unusable history, atomic writes" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buf: [3][128]u8 = undefined;
+    const dir = try std.mem.print(&buf[0], ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const config = try std.mem.print(&buf[1], "{s}/targets.json", .{dir});
+    const history = try std.mem.print(&buf[2], "{s}/history.json", .{dir});
+
+    // No target list: a writable instance starts empty, a read-only one fails.
+    var m: Monitor = .{ .gpa = testing.allocator, .io = testing.io, .config_path = config, .history_path = history };
+    defer m.deinit();
+    try m.loadConfig();
+    try testing.expectEqual(0, m.targets.items.len);
+    m.read_only = true;
+    try testing.expectError(error.FileNotFound, m.loadConfig());
+    m.read_only = false;
+
+    // The first change writes the list (through a synced temporary file).
+    const id = try m.add("a", "192.0.2.1");
+    const saved = try tmp.dir.readFileAlloc(testing.io, "targets.json", testing.allocator, .limited(4096));
+    defer testing.allocator.free(saved);
+    try testing.expect(std.mem.find(u8, saved, "\"host\": \"192.0.2.1\"") != null);
+
+    // Garbage is moved aside (with a warning, muted here), the daemon starts
+    // without history.
+    testing.log_level = .err;
+    defer testing.log_level = .warn;
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "history.json", .data = "{\"cycle_s\":60,\"tar" });
+    try m.loadHistory();
+    _ = try tmp.dir.statFile(testing.io, "history.json.bad", .{});
+    try testing.expectError(error.FileNotFound, tmp.dir.statFile(testing.io, "history.json", .{}));
+
+    // An impossible sample (more replies than probes) is skipped, not served.
+    const now = Io.Clock.real.now(testing.io).toSeconds();
+    const t = now - @mod(now, 60);
+    var json: [256]u8 = undefined;
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "history.json", .data = try std.mem.print(
+        &json,
+        "{{\"cycle_s\":60,\"targets\":[{{\"id\":{d},\"samples\":[[{d},2,5,1000],[{d},5,4,1000]]}}]}}",
+        .{ id, t - 60, t },
+    ) });
+    try m.loadHistory();
+    const target = m.targets.items[0];
+    try testing.expectEqual(0, target.history[m.slot(t - 60)].t);
+    try testing.expectEqual(4, target.history[m.slot(t)].recv);
 }
 
 test "names and hosts are validated" {

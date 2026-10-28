@@ -2,22 +2,41 @@
 
 ## Unreleased
 
-### fping-watch 1.0.0: a finished demo, shipped as a Debian package
+### fping-watch 1.0.0: a finished application, shipped as a Debian package
 
 The example application is no longer a proof of concept: it is finished for
-its purpose (the library's example and a public read-only demo) and stays
-deliberately small. Authentication, more targets and a real time-series
-store are out of its scope.
+its purpose (the library's example, a ping monitor to run for yourself, and
+a public read-only demo) and stays deliberately small. Authentication, more
+targets and a real time-series store are out of its scope.
 
 - **Debian packages**: releases now carry `fping-watch_<version>_amd64.deb` and
   `_arm64.deb`, built by `example-apps/fping-watch/package.sh` (called by
   `scripts/release.sh`, which smoke-tests the packaged binary). They install a
-  sandboxed systemd service (`DynamicUser`, seccomp `@system-service`, IP
-  sockets only, `systemd-analyze security` 1.6), read-only on
-  `127.0.0.1:8080`; `/etc/fping-watch/targets.json` is copied from the default
-  on first install only, and `/etc/fping-watch/env` sets the listen address.
-  Tested in a Debian container under systemd: install, reconfigure, upgrade,
-  remove, purge.
+  sandboxed systemd service on `127.0.0.1:8080`, **writable by default**: the
+  target list lives in the state directory
+  (`/var/lib/fping-watch/targets.json`) and starts empty. A public demo
+  sets `FPING_WATCH_OPTS=--read-only` and `FPING_WATCH_TARGETS` in
+  `/etc/fping-watch/env`; `/healthz` reports `read_only`, so a deployment can
+  check it. The service has no capabilities at all (ping sockets only; a
+  drop-in for `CAP_NET_RAW` is documented), runs as a `DynamicUser` in a
+  private user namespace with seccomp `@system-service` and IP sockets only
+  (`systemd-analyze security` 1.3). The maintainer scripts are what
+  `dh_installsystemd` generates: a failed start does not fail the
+  installation, an admin's `disable` survives upgrades, `policy-rc.d` is
+  honoured. Tested in a Debian 13 container under systemd: install, add a
+  target and ping it, switch to read-only, corrupt history, upgrade, disable,
+  remove, reinstall, purge.
+- **DNS rebinding guard**: a writable instance answers only when `Host` is an
+  IP address, `localhost` or a `--allow-host` name (`421` otherwise). Being on
+  loopback did not keep web pages out: a page could point its own name at
+  127.0.0.1 and add targets as its own origin, past the JSON content type
+  check, then read which internal addresses answer.
+- **Robust files**: the target list and the history are written through a
+  temporary file synced to disk before the rename. An unreadable history is
+  moved to `history.json.bad` with a warning instead of keeping the daemon
+  from starting (under systemd: a restart every 5 s, forever). History
+  samples with more replies than probes are skipped instead of making every
+  `/api/state` panic.
 - **About page for a demo hub**: `zig build about` (a host tool,
   `tools/about.zig`) turns `deploy/about.json` into `about-card.html` (an
   unstyled `<article>` fragment with stable class names and schema.org

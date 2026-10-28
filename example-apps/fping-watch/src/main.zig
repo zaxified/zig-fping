@@ -20,6 +20,7 @@ const usage =
     \\  --targets FILE       target list, JSON (default targets.json)
     \\  --history FILE       keep the 24 h history across restarts (default: memory only)
     \\  --read-only          public demo: refuse every change
+    \\  --allow-host NAME    also answer to this host name (repeatable); see README
     \\  --cycle SECONDS      seconds between probing cycles (default 60)
     \\  --version            print the version and exit
     \\
@@ -33,6 +34,8 @@ pub fn main(init: std.process.Init) !void {
     var listen_text: []const u8 = "127.0.0.1:8080";
     var monitor: Monitor = .{ .gpa = gpa, .io = io, .config_path = "targets.json" };
     defer monitor.deinit();
+    var hosts: std.ArrayList([]const u8) = .empty;
+    defer hosts.deinit(gpa);
 
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
@@ -55,12 +58,15 @@ pub fn main(init: std.process.Init) !void {
             monitor.config_path = value;
         } else if (std.mem.eql(u8, arg, "--history")) {
             monitor.history_path = value;
+        } else if (std.mem.eql(u8, arg, "--allow-host")) {
+            try hosts.append(gpa, value);
         } else if (std.mem.eql(u8, arg, "--cycle")) {
             monitor.cycle_s = std.fmt.parseInt(u31, value, 10) catch return fail(io, "bad --cycle");
             if (monitor.cycle_s < 5) return fail(io, "--cycle must be at least 5");
         } else return fail(io, "unknown option");
     }
 
+    allowed_hosts = hosts.items;
     monitor.loadConfig() catch |err| fatal(io, "cannot load the targets from {s}: {t}", .{ monitor.config_path, err });
     monitor.loadHistory() catch |err| fatal(io, "cannot load the history from {s}: {t} (move it away to start afresh)", .{ monitor.history_path.?, err });
 
@@ -221,9 +227,47 @@ fn serve(monitor: *Monitor, connections: *Connections, slot: usize, stream: Io.n
         log.debug("request failed: {t}", .{err});
 }
 
+/// Host names a writable instance answers to besides IP literals and
+/// `localhost` (`--allow-host`); set once before the server starts.
+var allowed_hosts: []const []const u8 = &.{};
+
+/// DNS rebinding guard for a writable instance. A web page on another site
+/// can point its own name at 127.0.0.1 and then talk to this server as its
+/// own origin, so the JSON content type check stops nothing. Its requests
+/// still carry its name in `Host`: answer only to IP literals (an origin
+/// that cannot be rebound), `localhost` and the `--allow-host` names. A
+/// read-only instance changes nothing and shows only what it publishes, so
+/// it answers to any name and its proxy needs no configuration.
+fn hostAllowed(req: *const http.Server.Request) bool {
+    var headers = req.iterateHeaders();
+    while (headers.next()) |h| {
+        if (std.ascii.eqlIgnoreCase(h.name, "host")) return hostNameAllowed(h.value, allowed_hosts);
+    }
+    return false;
+}
+
+fn hostNameAllowed(host: []const u8, allowed: []const []const u8) bool {
+    if (Io.net.IpAddress.parseLiteral(host)) |_| return true else |_| {}
+    var name = host[0 .. std.mem.findScalar(u8, host, ':') orelse host.len];
+    if (std.mem.endsWith(u8, name, ".")) name = name[0 .. name.len - 1];
+    if (std.ascii.eqlIgnoreCase(name, "localhost")) return true;
+    for (allowed) |a| if (std.ascii.eqlIgnoreCase(name, a)) return true;
+    return false;
+}
+
+test "writable instance: Host header guard" {
+    const allowed: []const []const u8 = &.{"ping.example.org"};
+    for ([_][]const u8{ "127.0.0.1", "127.0.0.1:8080", "[::1]:8080", "192.0.2.7", "localhost:8080", "LOCALHOST.", "ping.example.org", "Ping.Example.Org:443" }) |h|
+        try std.testing.expect(hostNameAllowed(h, allowed));
+    for ([_][]const u8{ "", "evil.example", "evil.example:8080", "localhost.evil.example", "127.0.0.1.evil.example", "ping.example.org.evil.example" }) |h|
+        try std.testing.expect(!hostNameAllowed(h, allowed));
+}
+
 fn route(monitor: *Monitor, req: *http.Server.Request, arena: std.mem.Allocator) !void {
     const method = req.head.method;
     const path = req.head.target[0 .. std.mem.findScalar(u8, req.head.target, '?') orelse req.head.target.len];
+    if (!monitor.read_only and !hostAllowed(req))
+        return sendError(req, .misdirected_request, "unknown host name; start the server with --allow-host NAME");
 
     if (method == .GET or method == .HEAD) {
         if (std.mem.eql(u8, path, "/")) return send(req, .ok, "text/html; charset=utf-8", index_html);
@@ -234,8 +278,8 @@ fn route(monitor: *Monitor, req: *http.Server.Request, arena: std.mem.Allocator)
         if (std.mem.eql(u8, path, "/healthz")) {
             const h = monitor.health(Io.Clock.real.now(monitor.io).toSeconds());
             return send(req, if (h.ok) .ok else .service_unavailable, "application/json", try arena.print(
-                "{{\"ok\":{},\"probing_ok\":{},\"last_cycle\":{d},\"version\":\"{s}\"}}",
-                .{ h.ok, h.probing_ok, h.last_cycle, version },
+                "{{\"ok\":{},\"probing_ok\":{},\"last_cycle\":{d},\"read_only\":{},\"version\":\"{s}\"}}",
+                .{ h.ok, h.probing_ok, h.last_cycle, monitor.read_only, version },
             ));
         }
         return sendError(req, .not_found, "not found");

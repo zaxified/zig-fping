@@ -1,15 +1,23 @@
 #!/bin/sh
-# The target list is not a conffile (dpkg would ask on every upgrade where
-# it was edited): the default is copied once, then it belongs to the admin.
+# What dh_installsystemd generates: enable the service on first install
+# (and keep an admin's disable on upgrades), then start or restart it. A
+# service that fails to start does not fail the installation: its status
+# and /healthz tell why. deb-systemd-invoke also honours policy-rc.d.
 set -e
-if [ "$1" = configure ]; then
-    if [ ! -e /etc/fping-watch/targets.json ]; then
-        install -D -m 0644 /usr/share/fping-watch/targets.json /etc/fping-watch/targets.json
-    fi
-    if [ -d /run/systemd/system ]; then
-        systemctl daemon-reload
-        systemctl enable fping-watch.service >/dev/null 2>&1
-        systemctl restart fping-watch.service
-    fi
-fi
+case "$1" in
+    configure | abort-upgrade | abort-deconfigure | abort-remove)
+        deb-systemd-helper unmask fping-watch.service >/dev/null || true
+        # was-enabled is true on a first install.
+        if deb-systemd-helper --quiet was-enabled fping-watch.service; then
+            deb-systemd-helper enable fping-watch.service >/dev/null || true
+        else
+            deb-systemd-helper update-state fping-watch.service >/dev/null || true
+        fi
+        if [ -d /run/systemd/system ]; then
+            systemctl --system daemon-reload >/dev/null || true
+            if [ -n "$2" ]; then action=restart; else action=start; fi
+            deb-systemd-invoke "$action" fping-watch.service >/dev/null || true
+        fi
+        ;;
+esac
 exit 0

@@ -55,13 +55,18 @@ status() {
 }
 
 "$BIN" --version | grep -q '^fping-watch [0-9]' || fail "--version"
-"$BIN" --targets missing.json >log 2>&1 && fail "started without a target list"
+"$BIN" --read-only --targets missing.json >log 2>&1 && fail "read-only started without a target list"
 grep -q 'cannot load the targets from missing.json: FileNotFound' log || fail "startup error message: $(cat log)"
 
 start
 curl -sf "$URL/app.js" >/dev/null || fail "app.js"
 curl -sf "$URL/favicon.svg" | grep -q '<svg' || fail "favicon.svg"
-curl -sf "$URL/healthz" | grep -q '"ok":true' || fail "not healthy at start"
+curl -sf "$URL/healthz" | grep -q '"ok":true.*"read_only":false' || fail "not healthy at start"
+# DNS rebinding: a writable instance answers only to IP literals, localhost
+# and --allow-host names.
+host() { curl -s -o /dev/null -w '%{http_code}' -H "host: $1" "$URL/api/state"; }
+[ "$(host evil.example)" = 421 ] || fail "writable instance answers to any Host"
+[ "$(host localhost:$PORT)" = 200 ] || fail "writable instance refuses localhost"
 curl -sI "$URL/" | grep -qi '^content-security-policy:' || fail "no CSP header"
 # A client that connects and sends nothing is cut off at the connection
 # deadline (10 s); checked at the end, it runs while the cycle completes.
@@ -109,6 +114,8 @@ stop
 # Read-only: history survives the restart, every change is refused.
 start --read-only
 curl -sf "$URL/api/state" | grep -q '"read_only":true' || fail "not read-only"
+curl -sf "$URL/healthz" | grep -q '"read_only":true' || fail "/healthz does not report read-only"
+[ "$(host ping.example.org)" = 200 ] || fail "read-only instance refuses a proxy's Host"
 curl -sf "$URL/api/state" | grep -q '"loss":\[[^]]*[0-9]' || fail "history lost on restart"
 status 403 POST /api/targets/1/pause
 status 403 DELETE /api/targets/1

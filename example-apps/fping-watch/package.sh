@@ -1,8 +1,8 @@
 #!/bin/sh
-# Build the Debian packages of the read-only demo:
-# fping-watch_<version>_{amd64,arm64}.deb. The binary is static (no libc),
-# so the package depends on nothing and installs on any Debian or Ubuntu
-# with systemd: `apt install ./fping-watch_<version>_amd64.deb`.
+# Build the Debian packages: fping-watch_<version>_{amd64,arm64}.deb. The
+# binary is static (no libc), so the package needs only what every systemd
+# host has (init-system-helpers, for the maintainer scripts) and installs on
+# any Debian or Ubuntu: `apt install ./fping-watch_<version>_amd64.deb`.
 #
 #   ./package.sh [--skip-tests] [OUTDIR]     (default OUTDIR: zig-out/deb)
 #
@@ -58,15 +58,16 @@ Version: $VERSION
 Architecture: $arch
 Maintainer: zaxified <zaxified@users.noreply.github.com>
 Installed-Size: $(du -sk "$stage/usr" | cut -f1)
+Depends: init-system-helpers
 Section: net
 Priority: optional
 Homepage: https://github.com/zaxified/zig-fping/tree/main/example-apps/fping-watch
-Description: ping monitor with a web page (read-only demo)
- Pings the targets in /etc/fping-watch/targets.json once a minute and serves
- a web page with the last 24 hours of status, latency and packet loss, on
- 127.0.0.1:8080 (FPING_WATCH_LISTEN in /etc/fping-watch/env). Read-only:
- meant to be published behind a reverse proxy. Built on zig-fping; one
- static binary, no dependencies.
+Description: ping monitor with a web page
+ Pings a list of targets once a minute and serves a web page with the last
+ 24 hours of status, latency and packet loss, on 127.0.0.1:8080. Targets are
+ added, paused and acknowledged in the page; FPING_WATCH_OPTS=--read-only in
+ /etc/fping-watch/env turns it into a public demo for a reverse proxy.
+ Built on zig-fping; one static binary.
 EOF
     dpkg-deb --root-owner-group -Zxz --build "$stage" "$deb" >/dev/null
 done

@@ -1,17 +1,24 @@
-# fping-watch, the public read-only demo; shipped in the .deb (package.sh).
-# Local settings belong in /etc/fping-watch/env (FPING_WATCH_LISTEN=ADDR:PORT),
-# the target list in /etc/fping-watch/targets.json; not here.
+# fping-watch, shipped in the .deb (package.sh). Writable on loopback by
+# default; local settings belong in /etc/fping-watch/env, not here:
+#   FPING_WATCH_LISTEN=ADDR:PORT       (default 127.0.0.1:8080)
+#   FPING_WATCH_TARGETS=FILE           (default: in the state directory, so
+#                                       changes made in the page persist)
+#   FPING_WATCH_OPTS=--read-only       (a public demo; also --allow-host NAME)
 [Unit]
-Description=fping-watch ping monitor (read-only demo)
+Description=fping-watch ping monitor
 Documentation=https://github.com/zaxified/zig-fping/tree/main/example-apps/fping-watch
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Environment=FPING_WATCH_LISTEN=127.0.0.1:8080
+Environment=FPING_WATCH_TARGETS=/var/lib/fping-watch/targets.json
+Environment=FPING_WATCH_OPTS=
 EnvironmentFile=-/etc/fping-watch/env
-ExecStart=/usr/bin/fping-watch --read-only --listen ${FPING_WATCH_LISTEN} \
-    --targets /etc/fping-watch/targets.json --history /var/lib/fping-watch/history.json
+# $FPING_WATCH_OPTS unbraced: split into words, none when empty.
+ExecStart=/usr/bin/fping-watch --listen ${FPING_WATCH_LISTEN} \
+    --targets ${FPING_WATCH_TARGETS} --history /var/lib/fping-watch/history.json \
+    $FPING_WATCH_OPTS
 Restart=on-failure
 RestartSec=5s
 
@@ -21,10 +28,11 @@ StateDirectory=fping-watch
 WorkingDirectory=/var/lib/fping-watch
 UMask=0077
 
-# ICMP: unprivileged ping sockets where net.ipv4.ping_group_range covers the
-# service's group (the default on Debian and Ubuntu), raw sockets otherwise.
-AmbientCapabilities=CAP_NET_RAW
-CapabilityBoundingSet=CAP_NET_RAW
+# No capabilities at all. ICMP goes through unprivileged ping sockets, which
+# net.ipv4.ping_group_range must allow for the service's group; systemd's
+# own sysctl defaults allow every group. Where they do not, a drop-in can
+# grant CAP_NET_RAW instead (see README "Deploying").
+CapabilityBoundingSet=
 NoNewPrivileges=yes
 
 # Sandbox. The binary is static (no libc) and only needs IP sockets.
@@ -32,6 +40,7 @@ ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=yes
+PrivateUsers=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectKernelLogs=yes
