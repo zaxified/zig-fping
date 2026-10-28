@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+### fping-watch: jitter, a demo with sample data
+
+- **Jitter** per cycle (mean step between consecutive replies' round-trip
+  times): a `jitter` series in `/api/state`, a ± jitter band in the chart,
+  24 h jitter and 95th percentile in the stats. History files from 1.0.0
+  still load.
+- **Read-only shows every control**; using one explains that it is a demo
+  (the server still answers 403). Every button explains itself on hover.
+- **`--demo`** (read-only too): after the first cycle and at every full
+  hour, history older than the last hour of real probing is replaced with
+  sample data, one scenario per target (`"demo"` in the target list:
+  `steady`, `evening_congestion`, `route_change`, `flapping`, `outage`,
+  `down`, `bufferbloat`, `long_haul`), scaled to the target's real latency.
+  The chart shades it as "sample data"; it is never written to the history
+  file. The package ships `/usr/share/fping-watch/demo-targets.json`:
+  public IPv4 and IPv6 targets, the DOWN one in 203.0.113.0/24 (RFC 5737).
+  `/healthz` reports `demo`.
+
 ### Pending upstream (deferred)
 
 To be implemented once the change reaches an upstream release tag
