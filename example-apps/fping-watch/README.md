@@ -195,10 +195,34 @@ ping.example.org {
 }
 ```
 
+## About page
+
+For a page that lists several demos, the package carries a description of
+this one in `/usr/share/fping-watch/about/` (`zig build about` writes the same
+into `zig-out/about/`), generated from [deploy/about.json](deploy/about.json):
+
+| file | |
+|---|---|
+| `about-card.html` | an HTML fragment to include: one `<article class="demo" id="demo-fping-watch">`, no styles, no scripts; class names (`demo-title`, `demo-tagline`, `demo-screenshot`, `demo-summary`, `demo-features`, `demo-facts`, `demo-source`) for the hub to style, schema.org `SoftwareApplication` microdata, `data-version` |
+| `about.html` | the same card as a standalone page (light and dark) |
+| `about.json` | the same data plus `version`, for templating |
+| `screenshot.png` | referenced by both pages relatively, keep it next to them |
+
+None of them links to the demo itself: only the hub knows its URL. With
+Ansible, after the package is installed on the same host:
+
+```yaml
+- name: fping-watch about card
+  ansible.builtin.copy:
+    src: /usr/share/fping-watch/about/
+    dest: "{{ demo_hub_root }}/fping-watch/"
+    remote_src: true
+```
+
 ## Tests
 
 ```sh
-zig build test     # unit tests: status, acknowledgement, history ring, cache, health, validation
+zig build test     # unit tests: status, acknowledgement, history ring, cache, health, validation, escaping
 sh smoke.sh        # end to end: loopback targets, API, ETag, health, deadline, read-only mode
 ./package.sh       # the .deb packages; smoke-tests the packaged binary first
 ```

@@ -18,6 +18,11 @@ store are out of its scope.
   on first install only, and `/etc/fping-watch/env` sets the listen address.
   Tested in a Debian container under systemd: install, reconfigure, upgrade,
   remove, purge.
+- **About page for a demo hub**: `zig build about` (a host tool,
+  `tools/about.zig`) turns `deploy/about.json` into `about-card.html` (an
+  unstyled `<article>` fragment with stable class names and schema.org
+  microdata), a standalone `about.html` and `about.json`; the package ships
+  them with the screenshot in `/usr/share/fping-watch/about/`.
 - `GET /healthz`: `503` when cycles stop finishing or the ICMP socket cannot
   be opened.
 - `--version`; startup errors (no target list, unreadable history, port in

@@ -12,8 +12,9 @@ pub fn build(b: *std.Build) void {
     const use_llvm: ?bool = if (selfhosted) null else true;
     const strip = b.option(bool, "strip", "Strip debug info (bundle.sh does)");
 
+    const version = @import("build.zig.zon").version;
     const options = b.addOptions();
-    options.addOption([]const u8, "version", @import("build.zig.zon").version);
+    options.addOption([]const u8, "version", version);
 
     const fping = b.dependency("zig_fping", .{ .target = target, .optimize = optimize });
     const mod = b.createModule(.{
@@ -35,5 +36,24 @@ pub fn build(b: *std.Build) void {
     b.step("run", "Run (pass options after --, e.g. -- --listen 127.0.0.1:8080)").dependOn(&run.step);
 
     const tests = b.addTest(.{ .root_module = mod, .use_llvm = use_llvm });
-    b.step("test", "Run unit tests").dependOn(&b.addRunArtifact(tests).step);
+    const test_step = b.step("test", "Run unit tests");
+    test_step.dependOn(&b.addRunArtifact(tests).step);
+
+    // The about page for a demo hub, from deploy/about.json, into
+    // zig-out/about/ (package.sh ships it in the .deb). A host tool, not
+    // part of the daemon.
+    const about_mod = b.createModule(.{
+        .root_source_file = b.path("tools/about.zig"),
+        .target = b.graph.host,
+        .optimize = .safe,
+    });
+    const about_tool = b.addExecutable(.{ .name = "about", .root_module = about_mod, .use_llvm = use_llvm });
+    const gen = b.addRunArtifact(about_tool);
+    gen.addFileArg(b.path("deploy/about.json"));
+    gen.addArg(version);
+    const about_step = b.step("about", "Generate the about page into zig-out/about/");
+    inline for (.{ "about.json", "about.html", "about-card.html" }) |name|
+        about_step.dependOn(&b.addInstallFile(gen.addOutputFileArg(name), "about/" ++ name).step);
+    about_step.dependOn(&b.addInstallFile(b.path("doc/screenshot.png"), "about/screenshot.png").step);
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = about_mod, .use_llvm = use_llvm })).step);
 }
