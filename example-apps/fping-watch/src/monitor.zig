@@ -250,7 +250,15 @@ pub const Monitor = struct {
             }
             break :blk list.items;
         };
-        if (jobs.len == 0) return;
+        if (jobs.len == 0) {
+            if (m.demo) {
+                m.mutex.lockUncancelable(m.io);
+                defer m.mutex.unlock(m.io);
+                m.demoFillLocked(t);
+                m.version += 1;
+            }
+            return;
+        }
 
         // 2. Resolve names (numeric addresses skip DNS).
         for (jobs) |*job| {
@@ -315,8 +323,12 @@ pub const Monitor = struct {
         const hour = t - @mod(t, 3600);
         if (hour == m.demo_hour) return;
         m.demo_hour = hour;
-        const live_from = @max(hour - 3600, m.demo_since);
+        // On a cycle boundary (`t` and `demo_since` are), so the real
+        // samples are found below whatever `cycle_s` is.
+        const hour_ago = hour - 3600 + @mod(-(hour - 3600), m.cycle_s);
+        const live_from = @max(hour_ago, m.demo_since);
         m.demo_from = live_from;
+        const oldest = t - (history_len - 1) * m.cycle_s;
         for (m.targets.items) |target| {
             const scenario = target.scenario orelse continue;
             // The sample past is scaled to the target's real median latency.
@@ -330,13 +342,10 @@ pub const Monitor = struct {
                     n += 1;
                 }
             }
-            std.mem.sortUnstable(u32, real[0..n], {}, std.sort.asc(u32));
-            const base_ms: f64 = if (n > 0) @as(f64, @floatFromInt(real[n / 2])) / 1000 else 20;
+            const base_ms: f64 = if (n > 0) @as(f64, @floatFromInt(median(real[0..n]))) / 1000 else 20;
 
-            var k: i64 = 1;
-            while (k < history_len) : (k += 1) {
-                const when = t - k * m.cycle_s;
-                if (when >= live_from) continue;
+            var when = live_from - m.cycle_s;
+            while (when >= oldest) : (when -= m.cycle_s) {
                 var rtts: [probes_per_cycle]u32 = undefined;
                 const replies = demo.probes(scenario, target.id, when, base_ms, live_from, &rtts);
                 var sample: Sample = .{ .t = when, .sent = probes_per_cycle };
@@ -465,8 +474,11 @@ pub const Monitor = struct {
         for (m.targets.items, 0..) |t, i| {
             w.print("{s}{{\"id\":{d},\"samples\":[", .{ if (i == 0) "" else ",", t.id }) catch return;
             var first = true;
+            // Sample data is regenerated, never kept: a history file must
+            // not hand made-up outages to an instance without --demo.
+            const sample_before = if (m.demo and t.scenario != null) m.demo_from else 0;
             for (t.history) |s| {
-                if (s.t == 0) continue;
+                if (s.t == 0 or s.t < sample_before) continue;
                 w.print("{s}[{d},{d},{d},{d},{d}]", .{ if (first) "" else ",", s.t, s.sent, s.recv, s.rtt_us, s.jitter_us }) catch return;
                 first = false;
             }
@@ -521,13 +533,13 @@ pub const Monitor = struct {
         );
         for (m.targets.items, 0..) |t, i| {
             try w.print(
-                "{s}{{\"id\":{d},\"name\":{f},\"host\":{f},\"status\":\"{t}\",\"paused\":{},\"acked\":{},\"ok_streak\":{d},\"error\":{f}",
+                "{s}{{\"id\":{d},\"name\":{f},\"host\":{f},\"status\":\"{t}\",\"paused\":{},\"acked\":{},\"ok_streak\":{d},\"error\":{f},\"sample\":{}",
                 .{
                     if (i == 0) "" else ",",         t.id,
                     std.json.fmt(t.name, .{}),       std.json.fmt(t.host, .{}),
                     t.status(),                      t.paused,
                     t.acked,                         t.ok_streak,
-                    std.json.fmt(t.last_error, .{}),
+                    std.json.fmt(t.last_error, .{}), m.demo and t.scenario != null,
                 },
             );
             try w.writeAll(",\"rtt\":[");
@@ -550,8 +562,8 @@ pub const Monitor = struct {
             if (s.t != at or s.sent == 0) {
                 try w.writeAll("null");
             } else switch (what) {
-                .rtt => if (s.recv == 0) try w.writeAll("null") else try w.print("{d:.2}", .{@as(f64, @floatFromInt(s.rtt_us)) / 1000}),
-                .jitter => if (s.recv < 2) try w.writeAll("null") else try w.print("{d:.2}", .{@as(f64, @floatFromInt(s.jitter_us)) / 1000}),
+                .rtt => if (s.recv == 0) try w.writeAll("null") else try writeMs(w, s.rtt_us),
+                .jitter => if (s.recv < 2) try w.writeAll("null") else try writeMs(w, s.jitter_us),
                 .loss => try w.print("{d}", .{@as(u32, s.sent - s.recv) * 100 / s.sent}),
             }
         }
@@ -560,14 +572,25 @@ pub const Monitor = struct {
 
 // ----- helpers ------------------------------------------------------------------
 
+/// Milliseconds, two decimals below 10 ms (LAN targets) and one above.
+fn writeMs(w: *Io.Writer, us: u32) Io.Writer.Error!void {
+    const v = @as(f64, @floatFromInt(us)) / 1000;
+    if (us < 10_000) try w.print("{d:.2}", .{v}) else try w.print("{d:.1}", .{v});
+}
+
+/// Sorts `v` (not empty) and returns its median.
+fn median(v: []u32) u32 {
+    std.mem.sortUnstable(u32, v, {}, std.sort.asc(u32));
+    return v[v.len / 2];
+}
+
 /// Fills `sample.recv`, `rtt_us` (median) and `jitter_us` from the replies'
 /// round-trip times, given in reply order (sorted here).
 fn summarize(sample: *Sample, rtts: []u32) void {
     sample.recv = @intCast(rtts.len);
     if (rtts.len == 0) return;
     sample.jitter_us = jitter(rtts);
-    std.mem.sortUnstable(u32, rtts, {}, std.sort.asc(u32));
-    sample.rtt_us = rtts[rtts.len / 2];
+    sample.rtt_us = median(rtts);
 }
 
 /// Mean absolute difference between consecutive round-trip times, in reply
@@ -865,6 +888,17 @@ test "demo: sample data before the real hour, real data kept" {
     m.demoFillLocked(hour + 2 * 3600 + 540);
     try testing.expectEqual(hour + 3600, m.demo_from);
     try testing.expectEqual(4, t.history[m.slot(hour + 3600)].recv); // real
+    // A cycle that does not divide the hour still finds the real samples.
+    m.cycle_s = 7;
+    const base: i64 = 7 * 242_858_000; // cycle starts are multiples of cycle_s
+    m.demo_since = base;
+    m.demo_hour = 0;
+    const now = base + 7 * 1000; // two hour boundaries later
+    for (0..1001) |i| fakeCycle(&m, id, base + 7 * @as(i64, @intCast(i)), 5);
+    m.demoFillLocked(now);
+    try testing.expectEqual(0, @mod(m.demo_from, 7));
+    const calm7 = t.history[m.slot(m.demo_from - 7 * 300)];
+    try testing.expect(calm7.recv > 0 and calm7.rtt_us >= 3000 and calm7.rtt_us < 10_000);
 }
 
 test "names and hosts are validated" {

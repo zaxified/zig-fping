@@ -7,9 +7,10 @@
 //! sample past joins the live data. The page marks the sample part.
 //!
 //! Every cycle is drawn from a PRNG seeded with the target and the time, so
-//! the same minute looks the same after the next hourly refill. Time-of-day
-//! scenarios run on UTC (no time zones without libc); the others are placed
-//! relative to the start of the real data, so they never fall into it.
+//! the noise stays put across refills. Time-of-day scenarios run on UTC (no
+//! time zones without libc) and stay put too; the others are placed relative
+//! to the start of the real data, so they never fall into it, and move on
+//! with it every hour.
 
 const std = @import("std");
 

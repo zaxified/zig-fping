@@ -127,7 +127,9 @@ cat > demo.json <<'EOF2'
 { "targets": [ { "id": 1, "name": "lo", "host": "127.0.0.1", "demo": "outage" } ] }
 EOF2
 sed 's/"outage"/"nope"/' demo.json > bad-demo.json
-"$BIN" --demo --targets bad-demo.json >log 2>&1 && fail "demo started with an unknown scenario"
+# (A timeout, 124, means it started serving.)
+rc=0; timeout 5 "$BIN" --listen 127.0.0.1:$PORT --demo --targets bad-demo.json >log 2>&1 || rc=$?
+[ "$rc" != 0 ] && [ "$rc" != 124 ] || fail "demo started with an unknown scenario"
 start --demo --targets demo.json
 curl -sf "$URL/healthz" | grep -q '"read_only":true,"demo":true' || fail "/healthz does not report the demo"
 i=0

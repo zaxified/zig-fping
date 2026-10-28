@@ -298,8 +298,9 @@ scenario get it:
 | `long_haul` | a distant host: more jitter, busier 10-14 UTC |
 
 The sample data is scaled to the target's real median latency, so it joins
-the live hour, and is drawn from the target and the minute: the same minute
-looks the same after the next refill. Live probing stays real, so choose
+the live hour. Time-of-day scenarios stay where they are; the others are
+placed relative to the live hour, so they never fall into it, and move on
+with it every hour. The sample data is never written to the history file. Live probing stays real, so choose
 targets that answer. The package ships a list of public IPv4 and IPv6
 targets with one scenario each, `/usr/share/fping-watch/demo-targets.json`
 (`FPING_WATCH_TARGETS` can point at it directly); its DOWN target is in

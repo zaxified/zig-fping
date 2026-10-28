@@ -45,8 +45,9 @@ const percentile = (a, p) => {
 };
 // One cycle, for the beat strip and the chart tooltip. A demo marks the
 // sample data (everything before demo_from).
+const isSample = (t, at) => t.sample && at < state.demo_from;
 const describe = (t, i, at) =>
-  (at < state.demo_from ? "sample data · " : "") +
+  (isSample(t, at) ? "sample data · " : "") +
   (t.loss[i] === null
     ? `${time(at)} · no data`
     : `${time(at)} · ${ms(t.rtt[i])}` + (t.jitter[i] === null ? "" : ` ± ${ms(t.jitter[i])}`) + ` · ${t.loss[i]} % loss`);
@@ -215,7 +216,12 @@ function renderDetail(detail, t, s) {
     b.addEventListener("click", async () => {
       b.disabled = true;
       note.textContent = "";
-      try { await fn(); } catch (err) { note.textContent = err.message; b.disabled = false; }
+      try {
+        if ((await fn()) === false) b.disabled = false; // confirm() cancelled
+      } catch (err) {
+        note.textContent = err.message;
+        b.disabled = false;
+      }
     });
     actions.append(b);
   };
@@ -248,7 +254,7 @@ function renderChart(box, t) {
   }
   // A demo: shade the sample data, so nobody takes it for a real record.
   const real = n - 1 - (state.end - state.demo_from) / state.cycle_s;
-  if (state.demo_from > 0 && real > 0) {
+  if (t.sample && real > 0) {
     svg.append(svgEl("rect", { class: "sample", x: L, y: T, width: Math.min(x(real), W - R) - L, height: H - T - B }));
     const label = svgEl("text", { class: "axis", x: L + 6, y: T + 12 });
     label.textContent = "sample data";
