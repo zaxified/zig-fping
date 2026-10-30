@@ -19,6 +19,12 @@
   file. The package ships `/usr/share/fping-watch/demo-targets.json`:
   public IPv4 and IPv6 targets, the DOWN one in 203.0.113.0/24 (RFC 5737).
   `/healthz` reports `demo`.
+- **Fix: the page no longer jumps to the top while scrolling on a phone.**
+  A mobile browser resizes the viewport height whenever its toolbar slides
+  in or out; every resize re-rendered the list, which collapsed the page for
+  a moment and reset the scroll position. Now only a width change
+  re-renders, and a re-render (also the one after each cycle) keeps the
+  scroll position, with expanded details filled in before the next paint.
 
 ### Pending upstream (deferred)
 

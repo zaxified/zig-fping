@@ -134,13 +134,22 @@ function render() {
     summary.append(pill);
   }
 
+  // Swapping the list collapses the page for a moment, and the browser clamps
+  // the scroll position to the shorter page: a reader scrolled down would land
+  // at the top. Expanded details are filled in the same task (their chart
+  // needs the attached width) and the position is put back before any paint.
+  const y = window.scrollY;
   const list = $("#targets");
-  list.replaceChildren();
+  const expand = [];
+  list.replaceChildren(...state.targets.map((t) => renderTarget(t, expand)));
   if (state.targets.length === 0) list.append(el("p", "empty", "No targets yet."));
-  for (const t of state.targets) list.append(renderTarget(t));
+  for (const show of expand) show();
+  if (window.scrollY !== y) window.scrollTo(0, y);
 }
 
-function renderTarget(t) {
+// expand collects the detail renderers of expanded targets; render() calls
+// them once the row is in the page.
+function renderTarget(t, expand) {
   const node = $("#row").content.firstElementChild.cloneNode(true);
   const s = summarize(t);
   const [label, color] = STATUS[statusOf(t)];
@@ -167,7 +176,7 @@ function renderTarget(t) {
     history.replaceState(null, "", open.size ? `#${[...open].join(",")}` : location.pathname);
     toggle(open.has(t.id));
   });
-  if (open.has(t.id)) requestAnimationFrame(() => toggle(true));
+  if (open.has(t.id)) expand.push(() => toggle(true));
   return node;
 }
 
@@ -342,10 +351,17 @@ $("#add").addEventListener("submit", async (ev) => {
   }
 });
 
-let resizeTimer;
+// Only a new width changes the layout. A mobile browser resizes the height
+// whenever its toolbar slides in or out during scrolling; re-rendering on that
+// would fight the scroll.
+let resizeTimer, renderedWidth = window.innerWidth;
 window.addEventListener("resize", () => {
   clearTimeout(resizeTimer);
-  resizeTimer = setTimeout(() => state && render(), 150);
+  resizeTimer = setTimeout(() => {
+    if (!state || window.innerWidth === renderedWidth) return;
+    renderedWidth = window.innerWidth;
+    render();
+  }, 150);
 });
 
 // A background tab does not poll; it catches up when shown again.
