@@ -57,6 +57,15 @@ header {
   border: 1px solid var(--line); font-size: 13px; font-variant-numeric: tabular-nums;
 }
 .pill::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--c); }
+/* The pills filter the list: pressed, tinted in their colour; empty, faint. */
+button.pill { cursor: pointer; color: var(--text); font: inherit; font-size: 13px; }
+button.pill:hover { border-color: var(--c); }
+button.pill:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.pill[aria-pressed="true"] { border-color: var(--c); background: color-mix(in srgb, var(--c) 18%, var(--card)); }
+.pill.zero { color: var(--muted); }
+.pill.zero::before { opacity: 0.35; }
+.pill.health { font-weight: 600; }
+.pill-sep { width: 1px; align-self: stretch; margin: 2px 2px; background: var(--line); }
 
 .toolbar { display: flex; flex-wrap: wrap; gap: 8px 10px; align-items: center; margin-bottom: 14px; }
 #find, #sort, #order {
@@ -194,7 +203,8 @@ button, input { font: inherit; }
 .tagline { position: relative; }
 .target:has(.tag-popover) { overflow: visible; position: relative; z-index: 2; }
 .tag-popover {
-  position: absolute; top: calc(100% + 6px); left: 0; width: min(300px, calc(100vw - 32px)); cursor: default;
+  /* Above the open detail, whose chart is positioned and comes later. */
+  position: absolute; z-index: 10; top: calc(100% + 6px); left: 0; width: min(300px, calc(100vw - 32px)); cursor: default;
   background: var(--card); border: 1px solid var(--line); border-radius: 10px;
   box-shadow: 0 8px 24px rgb(0 0 0 / 0.18); overflow: hidden;
 }
@@ -227,5 +237,10 @@ footer a { color: inherit; }
 
 @media (max-width: 720px) {
   .head { grid-template-columns: auto 1fr auto; gap: 10px 12px; padding: 12px 14px; }
+  /* No room to hang the picker under the tags: a sheet at the bottom. */
+  .tag-popover, .add-tags .tag-popover {
+    position: fixed; left: 12px; right: 12px; bottom: 12px; top: auto; width: auto;
+    box-shadow: 0 -4px 32px rgb(0 0 0 / 0.25);
+  }
   .beats { grid-column: 1 / -1; grid-row: 2; justify-content: flex-start; }
 }

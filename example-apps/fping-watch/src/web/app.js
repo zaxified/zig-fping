@@ -9,6 +9,20 @@ let state = null;
 // What the list shows, kept in the URL fragment so a filtered view can be
 // bookmarked or sent: #open=3,5&tags=dns,ipv6&q=google&sort=loss&rev=1.
 // The 1.0 form, #3,5, still opens targets 3 and 5.
+// The status pills, which filter the list too: health over the last hour
+// (see healthOf), then the status now.
+const PILLS = {
+  ok: ["ok", "var(--up)", "Probed, and no problem in the last hour"],
+  nok: ["not ok", "var(--down)", "Needs attention: DOWN, losing probes now, or a problem in the last hour (a lost probe, or 10 ms of jitter or more); acknowledged outages are not counted"],
+  up: ["up", "var(--up)", "Every probe of the last cycle answered"],
+  degraded: ["loss", "var(--warn)", "Some probes of the last cycle lost"],
+  down: ["down", "var(--down)", "Every probe of the last cycle lost"],
+  acked: ["ack", "var(--ack)", "DOWN, and acknowledged"],
+  pending: ["pending", "var(--paused)", "Not probed yet"],
+  paused: ["paused", "var(--paused)", "Not probed: paused"],
+};
+const HEALTH = ["ok", "nok"];
+
 // Sort keys: status, name, and a metric over a window (loss1h, max24h, ...).
 const METRICS = { loss: "Packet loss", jitter: "Jitter", avg: "Average latency", max: "Worst latency" };
 const WINDOWS = { "1h": ["Last hour", "1 h", "hour"], "24h": ["Last 24 hours", "24 h", "day"] };
@@ -22,6 +36,7 @@ function parseView() {
   return {
     open: new Set(list("open").map(Number)), // ids of expanded targets
     tags: new Set(list("tags")), // a target must have every one
+    st: new Set(list("st").filter((k) => k in PILLS)), // a target must be in one
     q: p.get("q") || "",
     sort: p.get("sort") in SORTS ? p.get("sort") : "status",
     rev: p.get("rev") === "1",
@@ -33,6 +48,7 @@ function saveView() {
   const p = new URLSearchParams();
   if (view.open.size) p.set("open", [...view.open].join(","));
   if (view.tags.size) p.set("tags", [...view.tags].join(","));
+  if (view.st.size) p.set("st", [...view.st].join(","));
   if (view.q) p.set("q", view.q);
   if (view.sort !== "status") p.set("sort", view.sort);
   if (view.rev) p.set("rev", "1");
@@ -172,22 +188,13 @@ async function call(method, path, body) {
 function render() {
   $("#mode").hidden = !state.read_only;
 
-  // The summary counts every target: the filter narrows the list, not the
-  // overall health.
-  const counts = {};
-  for (const t of state.targets) counts[statusOf(t)] = (counts[statusOf(t)] || 0) + 1;
-  const summary = $("#summary");
-  summary.replaceChildren();
-  for (const key of ["up", "degraded", "down", "acked", "paused", "pending"]) {
-    if (!counts[key]) continue;
-    const pill = el("span", "pill", `${counts[key]} ${STATUS[key][0].toLowerCase()}`);
-    pill.style.setProperty("--c", STATUS[key][1]);
-    summary.append(pill);
-  }
-
   const hour = 3600 / state.cycle_s;
   const stats = new Map(state.targets.map((t) => [t.id, { day: summarize(t), hour: summarize(t, hour) }]));
-  const shown = sortTargets(state.targets.filter(matches), stats);
+  // The pills count what the tags and the search leave, like the facets of
+  // a shop's search: with a tag selected they show that tag's health.
+  const base = state.targets.filter(matches);
+  renderPills(base, stats);
+  const shown = sortTargets(base.filter((t) => inPills(t, stats.get(t.id))), stats);
   renderToolbar(shown.length);
 
   // A re-render gives the focus back to the control of a row that had it
@@ -228,7 +235,39 @@ function focusRow(id, key, caret) {
 
 // ----- filter and order ----------------------------------------------------------
 
-const filtered = () => view.tags.size > 0 || view.q !== "";
+const filtered = () => view.tags.size > 0 || view.q !== "" || view.st.size > 0;
+
+// ok, nok or neither: the first tiers of problems first need attention;
+// acknowledged, pending and paused targets are neither.
+function healthOf(t, st) {
+  const tier = problemTier(t, st);
+  return tier <= 2 ? "nok" : tier === 3 || tier === 5 ? "ok" : null;
+}
+
+// In one of the selected pills (none selected: every target).
+const inPills = (t, st) => view.st.size === 0 || view.st.has(statusOf(t)) || view.st.has(healthOf(t, st));
+
+function renderPills(base, stats) {
+  const counts = Object.fromEntries(Object.keys(PILLS).map((k) => [k, 0]));
+  for (const t of base) {
+    counts[statusOf(t)]++;
+    const h = healthOf(t, stats.get(t.id));
+    if (h) counts[h]++;
+  }
+  const bar = $("#summary");
+  bar.replaceChildren();
+  for (const [key, [label, color, hint]] of Object.entries(PILLS)) {
+    const on = view.st.has(key);
+    const pill = el("button", `pill${counts[key] ? "" : " zero"}${HEALTH.includes(key) ? " health" : ""}`, `${counts[key]} ${label}`);
+    pill.type = "button";
+    pill.style.setProperty("--c", color);
+    pill.setAttribute("aria-pressed", String(on));
+    pill.title = `${hint}. Click to ${on ? "stop showing only these" : "show only these"}; several pills show any of them.`;
+    pill.addEventListener("click", () => setView(() => (on ? view.st.delete(key) : view.st.add(key))));
+    bar.append(pill);
+    if (key === HEALTH[HEALTH.length - 1]) bar.append(el("span", "pill-sep"));
+  }
+}
 
 // Every selected tag, and every word of the search somewhere in the name, the
 // host or a tag.
@@ -296,6 +335,7 @@ function setView(change) {
 function clearFilter() {
   setView(() => {
     view.tags.clear();
+    view.st.clear();
     view.q = "";
     $("#find").value = "";
   });

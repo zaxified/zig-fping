@@ -19,6 +19,13 @@
   file. The package ships `/usr/share/fping-watch/demo-targets.json`:
   public IPv4 and IPv6 targets, the DOWN one in 203.0.113.0/24 (RFC 5737).
   `/healthz` reports `demo`.
+- **Status pills filter the list**: `ok` and `not ok` (DOWN, LOSS now, or a
+  problem in the last hour, unacknowledged: the first tiers of problems
+  first), then `up`, `loss`, `down`, `ack`, `pending` and `paused`, every
+  one shown even at 0. A click shows only that group, several pills show any
+  of them (and the tags and search still apply); the counts follow the tags
+  and the search, like a shop's search facets. Kept in the fragment
+  (`#st=nok,down`).
 - **Tags** per target (at most 8; lowercase, no spaces or commas), set when
   adding a target or later, with a picker like GitHub's label picker (in
   the add form, and next to the tags in the row): every tag in use with a
@@ -36,8 +43,8 @@
   more; within a tier more loss, then more jitter), with a button to reverse
   it; targets without data stay last. The view is kept in the URL fragment
   (`#open=3&tags=dns,ipv6&q=google&sort=loss1h&rev=1`, the old `#3,5` still
-  works) and follows a changed fragment without a reload. The summary pills
-  keep counting every target; a filtered list says "N of M shown".
+  works) and follows a changed fragment without a reload. A filtered list
+  says "N of M shown".
 - **Rename a target or move it to another host** in place: the ✎ next to
   its name (shown on hover where there is a mouse, always on touch screens)
   opens a name and host editor; `PATCH /api/targets/ID` (name, host and/or
@@ -50,6 +57,9 @@
   the editor open with the reason. The row head is no longer one button (it holds the edit buttons now):
   a click anywhere still expands it, and a full-size button underneath
   serves the keyboard.
+- The tag picker draws above an open detail (its chart showed through), and
+  on a narrow screen opens as a sheet at the bottom instead of running off
+  the right edge.
 - **Fix: the page no longer jumps to the top while scrolling on a phone.**
   A mobile browser resizes the viewport height whenever its toolbar slides
   in or out; every resize re-rendered the list, which collapsed the page for
