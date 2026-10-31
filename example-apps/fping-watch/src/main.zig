@@ -300,23 +300,30 @@ fn route(monitor: *Monitor, req: *http.Server.Request, arena: std.mem.Allocator)
     if (!std.mem.startsWith(u8, content_type, "application/json"))
         return sendError(req, .unsupported_media_type, "send application/json");
 
-    // POST /api/targets                {"name": ..., "host": ...}
+    // POST /api/targets                {"name": ..., "host": ..., "tags": [...]}
     if (method == .POST and std.mem.eql(u8, path, "/api/targets")) {
-        const NewTarget = struct { name: []const u8, host: []const u8 };
+        const NewTarget = struct { name: []const u8, host: []const u8, tags: []const []const u8 = &.{} };
         const body = try readBody(req, arena);
         const parsed = std.json.parseFromSliceLeaky(NewTarget, arena, body, .{}) catch
-            return sendError(req, .bad_request, "expected {\"name\": ..., \"host\": ...}");
-        const id = monitor.add(parsed.name, parsed.host) catch |err| return sendMonitorError(req, err);
+            return sendError(req, .bad_request, "expected {\"name\": ..., \"host\": ..., \"tags\": [...]}");
+        const id = monitor.add(parsed.name, parsed.host, parsed.tags) catch |err| return sendMonitorError(req, err);
         return send(req, .created, "application/json", try arena.print("{{\"id\":{d}}}", .{id}));
     }
 
-    // DELETE /api/targets/ID, POST /api/targets/ID/{pause,resume,ack,unack}
+    // DELETE /api/targets/ID, POST /api/targets/ID/{pause,resume,ack,unack},
+    // POST /api/targets/ID/tags {"tags": [...]}
     var parts = std.mem.tokenizeScalar(u8, path["/api/targets".len..], '/');
     const id = std.fmt.parseInt(u32, parts.next() orelse "", 10) catch return sendError(req, .not_found, "not found");
     const verb = parts.next();
     if (parts.next() != null) return sendError(req, .not_found, "not found");
     if (method == .DELETE and verb == null) {
         monitor.remove(id) catch |err| return sendMonitorError(req, err);
+    } else if (method == .POST and verb != null and std.mem.eql(u8, verb.?, "tags")) {
+        const Tags = struct { tags: []const []const u8 };
+        const body = try readBody(req, arena);
+        const parsed = std.json.parseFromSliceLeaky(Tags, arena, body, .{}) catch
+            return sendError(req, .bad_request, "expected {\"tags\": [...]}");
+        monitor.setTags(id, parsed.tags) catch |err| return sendMonitorError(req, err);
     } else if (method == .POST and verb != null) {
         const action = std.meta.stringToEnum(enum { pause, @"resume", ack, unack }, verb.?) orelse
             return sendError(req, .not_found, "not found");
@@ -418,6 +425,7 @@ fn sendMonitorError(req: *http.Server.Request, err: anyerror) !void {
         error.UnknownTarget => sendError(req, .not_found, "no such target"),
         error.InvalidName => sendError(req, .bad_request, "name: 1-64 printable characters"),
         error.InvalidHost => sendError(req, .bad_request, "host: an IP address or a DNS name"),
+        error.InvalidTags => sendError(req, .bad_request, "tags: at most 8, each 1-32 characters, no spaces or commas"),
         error.TooManyTargets => sendError(req, .conflict, "too many targets"),
         error.NotDown => sendError(req, .conflict, "only a DOWN target can be acknowledged"),
         else => err,

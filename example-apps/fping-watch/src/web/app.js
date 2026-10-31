@@ -4,9 +4,49 @@
 
 const REFRESH_MS = 15000;
 const BEAT_PX = 9; // beat width + gap, see .beat in style.css
-// Ids of expanded targets; a link to page#3 opens target 3.
-const open = new Set(location.hash.slice(1).split(",").filter(Boolean).map(Number));
 let state = null;
+
+// What the list shows, kept in the URL fragment so a filtered view can be
+// bookmarked or sent: #open=3,5&tags=dns,ipv6&q=google&sort=loss&rev=1.
+// The 1.0 form, #3,5, still opens targets 3 and 5.
+const SORTS = {
+  status: "Problems first",
+  name: "Name",
+  loss: "Packet loss (24 h)",
+  jitter: "Jitter (24 h)",
+  avg: "Average latency (24 h)",
+  max: "Worst latency (24 h)",
+};
+function parseView() {
+  const hash = location.hash.slice(1);
+  const p = new URLSearchParams(/^[\d,]+$/.test(hash) ? `open=${hash}` : hash);
+  const list = (key) => (p.get(key) || "").split(",").filter(Boolean);
+  return {
+    open: new Set(list("open").map(Number)), // ids of expanded targets
+    tags: new Set(list("tags")), // a target must have every one
+    q: p.get("q") || "",
+    sort: p.get("sort") in SORTS ? p.get("sort") : "status",
+    rev: p.get("rev") === "1",
+  };
+}
+const view = parseView();
+
+function saveView() {
+  const p = new URLSearchParams();
+  if (view.open.size) p.set("open", [...view.open].join(","));
+  if (view.tags.size) p.set("tags", [...view.tags].join(","));
+  if (view.q) p.set("q", view.q);
+  if (view.sort !== "status") p.set("sort", view.sort);
+  if (view.rev) p.set("rev", "1");
+  const hash = p.toString().replaceAll("%2C", ",");
+  history.replaceState(null, "", hash ? `#${hash}` : location.pathname + location.search);
+}
+
+// The tag editor of one target, kept across re-renders (a new cycle redraws
+// the list while someone types).
+let editing = null; // { id, value }
+
+const splitTags = (text) => text.split(/[\s,]+/).filter(Boolean);
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const el = (tag, cls, text) => {
@@ -123,6 +163,8 @@ async function call(method, path, body) {
 function render() {
   $("#mode").hidden = !state.read_only;
 
+  // The summary counts every target: the filter narrows the list, not the
+  // overall health.
   const counts = {};
   for (const t of state.targets) counts[statusOf(t)] = (counts[statusOf(t)] || 0) + 1;
   const summary = $("#summary");
@@ -134,6 +176,14 @@ function render() {
     summary.append(pill);
   }
 
+  const stats = new Map(state.targets.map((t) => [t.id, summarize(t)]));
+  const shown = sortTargets(state.targets.filter(matches), stats);
+  renderToolbar(shown.length);
+
+  // A re-render while the tag editor has the focus gives it back.
+  const active = document.activeElement;
+  const refocus = active && active.classList.contains("tag-input") ? [active.selectionStart, active.selectionEnd] : null;
+
   // Swapping the list collapses the page for a moment, and the browser clamps
   // the scroll position to the shorter page: a reader scrolled down would land
   // at the top. Expanded details are filled in the same task (their chart
@@ -141,17 +191,119 @@ function render() {
   const y = window.scrollY;
   const list = $("#targets");
   const expand = [];
-  list.replaceChildren(...state.targets.map((t) => renderTarget(t, expand)));
+  list.replaceChildren(...shown.map((t) => renderTarget(t, stats.get(t.id), expand)));
   if (state.targets.length === 0) list.append(el("p", "empty", "No targets yet."));
+  else if (shown.length === 0) {
+    const p = el("p", "empty", "No target matches the filter. ");
+    const clear = el("button", "link", "Show all");
+    clear.type = "button";
+    clear.addEventListener("click", clearFilter);
+    p.append(clear);
+    list.append(p);
+  }
   for (const show of expand) show();
+  if (refocus) {
+    const input = $(".tag-input", list);
+    if (input) {
+      input.focus({ preventScroll: true });
+      input.setSelectionRange(...refocus);
+    }
+  }
   if (window.scrollY !== y) window.scrollTo(0, y);
+}
+
+// ----- filter and order ----------------------------------------------------------
+
+const filtered = () => view.tags.size > 0 || view.q !== "";
+
+// Every selected tag, and every word of the search somewhere in the name, the
+// host or a tag.
+function matches(t) {
+  for (const tag of view.tags) if (!t.tags.includes(tag)) return false;
+  const hay = [t.name, t.host, ...t.tags].map((s) => s.toLowerCase());
+  return splitTags(view.q.toLowerCase()).every((w) => hay.some((h) => h.includes(w)));
+}
+
+// Problems first: DOWN, LOSS, ACK, PENDING, UP, PAUSED.
+const RANK = { down: 0, degraded: 1, acked: 2, pending: 3, up: 4, paused: 5 };
+const byName = (a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" });
+
+// Each order has a natural direction (problems first, A to Z, the worst
+// figure first); `rev` turns it around. Targets without data go last either
+// way, and ties keep name order.
+function sortTargets(list, stats) {
+  const dir = view.rev ? -1 : 1;
+  const metric = { loss: "loss", jitter: "jitter", avg: "avg", max: "max" }[view.sort];
+  const cmp = {
+    status: (a, b) => RANK[statusOf(a)] - RANK[statusOf(b)],
+    name: () => 0,
+  }[view.sort];
+  return list.sort((a, b) => {
+    let d = 0;
+    if (metric) {
+      const x = stats.get(a.id)[metric], y = stats.get(b.id)[metric];
+      if (x === null || y === null) d = (x === null) - (y === null);
+      else d = dir * (y - x);
+    } else d = dir * cmp(a, b);
+    return d || (view.sort === "name" ? dir : 1) * byName(a, b);
+  });
+}
+
+function setView(change) {
+  change();
+  saveView();
+  if (state) render();
+}
+
+function clearFilter() {
+  setView(() => {
+    view.tags.clear();
+    view.q = "";
+    $("#find").value = "";
+  });
+}
+
+// The tag chips (every tag in use, plus a selected one no target has any
+// more, so it can be unselected), the order button and the match count.
+function renderToolbar(count) {
+  const all = new Set(state.targets.flatMap((t) => t.tags));
+  for (const tag of view.tags) all.add(tag);
+  const bar = $("#tagbar");
+  bar.replaceChildren();
+  for (const tag of [...all].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))) {
+    const chip = el("button", "chip", tag);
+    chip.type = "button";
+    chip.setAttribute("aria-pressed", String(view.tags.has(tag)));
+    chip.title = view.tags.has(tag) ? "Stop filtering by this tag" : "Show only targets with this tag";
+    chip.addEventListener("click", () => setView(() => (view.tags.has(tag) ? view.tags.delete(tag) : view.tags.add(tag))));
+    bar.append(chip);
+  }
+  bar.hidden = all.size === 0;
+
+  const order = $("#order");
+  const [fwd, back] = {
+    status: ["problems first", "OK first"],
+    name: ["A to Z", "Z to A"],
+  }[view.sort] || ["highest first", "lowest first"];
+  order.textContent = view.rev ? "↑" : "↓";
+  order.title = `Order: ${view.rev ? back : fwd} (click: ${view.rev ? fwd : back})`;
+  order.setAttribute("aria-label", order.title);
+
+  const note = $("#shown");
+  note.replaceChildren();
+  if (filtered()) {
+    note.append(`${count} of ${state.targets.length} shown `);
+    const clear = el("button", "link", "clear");
+    clear.type = "button";
+    clear.addEventListener("click", clearFilter);
+    note.append(clear);
+  }
 }
 
 // expand collects the detail renderers of expanded targets; render() calls
 // them once the row is in the page.
-function renderTarget(t, expand) {
+function renderTarget(t, s, expand) {
   const node = $("#row").content.firstElementChild.cloneNode(true);
-  const s = summarize(t);
   const [label, color] = STATUS[statusOf(t)];
 
   const badge = $(".badge", node);
@@ -159,6 +311,9 @@ function renderTarget(t, expand) {
   badge.style.setProperty("--c", color);
   $(".name", node).textContent = t.name;
   $(".host", node).textContent = t.host;
+  const tags = $(".tags", node);
+  for (const tag of t.tags) tags.append(el("span", view.tags.has(tag) ? "rtag on" : "rtag", tag));
+  tags.hidden = t.tags.length === 0;
   $(".uptime", node).textContent = s.uptime === null ? "–" : `${s.uptime.toFixed(s.uptime === 100 ? 0 : 2)} %`;
   $(".latency", node).textContent = t.paused ? "–" : ms(s.last);
   renderBeats($(".beats", node), t);
@@ -171,12 +326,12 @@ function renderTarget(t, expand) {
     if (show) renderDetail(detail, t, s);
   };
   head.addEventListener("click", () => {
-    if (open.has(t.id)) open.delete(t.id);
-    else open.add(t.id);
-    history.replaceState(null, "", open.size ? `#${[...open].join(",")}` : location.pathname);
-    toggle(open.has(t.id));
+    if (view.open.has(t.id)) view.open.delete(t.id);
+    else view.open.add(t.id);
+    saveView();
+    toggle(view.open.has(t.id));
   });
-  if (open.has(t.id)) expand.push(() => toggle(true));
+  if (view.open.has(t.id)) expand.push(() => toggle(true));
   return node;
 }
 
@@ -218,6 +373,7 @@ function renderDetail(detail, t, s) {
   const actions = $(".actions", detail);
   actions.replaceChildren();
   const note = el("span", "note");
+  if (editing && editing.id === t.id) return renderTagEditor(actions, note, t);
   const action = (text, hint, fn, cls) => {
     const b = el("button", cls, text);
     b.type = "button";
@@ -240,9 +396,49 @@ function renderDetail(detail, t, s) {
   if (t.status === "down" && !t.acked)
     action("Acknowledge", `Mark this outage as known: the target shows ACK instead of DOWN until ${state.ack_clear_after} cycles in a row are not DOWN`, () => call("POST", `${base}/ack`));
   if (t.acked) action("Remove acknowledgement", "Show this target as DOWN again", () => call("POST", `${base}/unack`));
+  action("Edit tags", "Labels to filter the list by, e.g. a site, a customer or a service", () => {
+    editing = { id: t.id, value: t.tags.join(" ") };
+    renderDetail(detail, t, s);
+    $(".tag-input", detail).focus();
+  });
   action("Remove", "Stop monitoring this target and delete its history",
-    () => (state.read_only || confirm(`Remove ${t.name}?`)) && call("DELETE", base).then(() => open.delete(t.id)), "danger");
+    () => (state.read_only || confirm(`Remove ${t.name}?`)) && call("DELETE", base).then(() => view.open.delete(t.id)), "danger");
   actions.append(note);
+}
+
+// The tag editor in place of the actions; `editing` keeps the typed value
+// across re-renders.
+function renderTagEditor(actions, note, t) {
+  const input = el("input", "tag-input");
+  input.value = editing.value;
+  input.placeholder = "Tags, separated by spaces";
+  input.setAttribute("aria-label", `Tags of ${t.name}`);
+  input.maxLength = 300;
+  input.addEventListener("input", () => (editing.value = input.value));
+  const close = () => {
+    editing = null;
+    render();
+  };
+  const save = async () => {
+    note.textContent = "";
+    try {
+      await call("POST", `api/targets/${t.id}/tags`, { tags: splitTags(input.value) });
+      close();
+    } catch (err) {
+      note.textContent = err.message;
+    }
+  };
+  input.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter") save();
+    if (ev.key === "Escape") close();
+  });
+  const button = (text, fn) => {
+    const b = el("button", null, text);
+    b.type = "button";
+    b.addEventListener("click", fn);
+    return b;
+  };
+  actions.append(input, button("Save", save), button("Cancel", close), note);
 }
 
 function renderChart(box, t) {
@@ -343,7 +539,7 @@ $("#add").addEventListener("submit", async (ev) => {
   const form = ev.target;
   $("#add-error").textContent = "";
   try {
-    await call("POST", "api/targets", { name: form.name.value.trim(), host: form.host.value.trim() });
+    await call("POST", "api/targets", { name: form.name.value.trim(), host: form.host.value.trim(), tags: splitTags(form.tags.value) });
     form.reset();
   } catch (err) {
     $("#add-error").textContent = err.message;
@@ -354,6 +550,25 @@ $("#add").addEventListener("submit", async (ev) => {
 // Only a new width changes the layout. A mobile browser resizes the height
 // whenever its toolbar slides in or out during scrolling; re-rendering on that
 // would fight the scroll.
+const find = $("#find");
+const sort = $("#sort");
+const syncControls = () => {
+  find.value = view.q;
+  sort.value = view.sort;
+};
+find.addEventListener("input", () => setView(() => (view.q = find.value.trim())));
+for (const [key, label] of Object.entries(SORTS)) sort.append(new Option(label, key));
+syncControls();
+sort.addEventListener("change", () => setView(() => (view.sort = sort.value)));
+$("#order").addEventListener("click", () => setView(() => (view.rev = !view.rev)));
+// A bookmark or a pasted link that differs only in the fragment does not
+// reload the page.
+window.addEventListener("hashchange", () => {
+  Object.assign(view, parseView());
+  syncControls();
+  if (state) render();
+});
+
 let resizeTimer, renderedWidth = window.innerWidth;
 window.addEventListener("resize", () => {
   clearTimeout(resizeTimer);

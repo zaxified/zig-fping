@@ -102,6 +102,13 @@ status 400 POST /api/targets '{"name":"x","host":"no such host!"}'
 status 201 POST /api/targets '{"name":"added","host":"127.0.0.2"}'
 status 200 DELETE /api/targets/4
 status 404 DELETE /api/targets/4
+status 201 POST /api/targets '{"name":"tagged","host":"127.0.0.3","tags":["Lab","core"]}'
+status 400 POST /api/targets '{"name":"x","host":"127.0.0.4","tags":["two words"]}'
+status 200 POST /api/targets/1/tags '{"tags":["loopback","v4"]}'
+status 400 POST /api/targets/1/tags '{"tags":["a,b"]}'
+status 404 POST /api/targets/99/tags '{"tags":["x"]}'
+curl -sf "$URL/api/state" | grep -q '"tags":\["loopback","v4"\]' || fail "tags not served"
+grep -q '"tags": \["lab","core"\]' targets.json || fail "tags not saved"
 # A form post (no JSON content type) is refused: the CSRF guard.
 got=$(curl -s -o /dev/null -w '%{http_code}' -X POST -d 'x=1' "$URL/api/targets/1/pause")
 [ "$got" = 415 ] || fail "form post: HTTP $got, expected 415"

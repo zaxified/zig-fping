@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-### fping-watch: jitter, a demo with sample data
+### fping-watch: jitter, a demo with sample data, tags, find and order
 
 - **Jitter** per cycle (mean step between consecutive replies' round-trip
   times): a `jitter` series in `/api/state`, a ± jitter band in the chart,
@@ -19,6 +19,19 @@
   file. The package ships `/usr/share/fping-watch/demo-targets.json`:
   public IPv4 and IPv6 targets, the DOWN one in 203.0.113.0/24 (RFC 5737).
   `/healthz` reports `demo`.
+- **Tags** per target (at most 8; lowercase, no spaces or commas), set when
+  adding a target or with "Edit tags" in its detail; saved in `targets.json`
+  (`"tags": [...]`, optional, files from 1.0.0 load unchanged), served in
+  `/api/state`, changed with `POST /api/targets/ID/tags`. The demo targets
+  carry tags.
+- **Filter, find and order** above the list: tag chips (a target must have
+  every selected tag), a search over name, host and tags (every word must
+  match), and an order: problems first (default), name, or the 24-hour packet
+  loss, jitter, average or worst latency, with a button to reverse it;
+  targets without data stay last. The view is kept in the URL fragment
+  (`#open=3&tags=dns,ipv6&q=google&sort=loss&rev=1`, the old `#3,5` still
+  works) and follows a changed fragment without a reload. The summary pills
+  keep counting every target; a filtered list says "N of M shown".
 - **Fix: the page no longer jumps to the top while scrolling on a phone.**
   A mobile browser resizes the viewport height whenever its toolbar slides
   in or out; every resize re-rendered the list, which collapsed the page for

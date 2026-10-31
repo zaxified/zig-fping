@@ -6,6 +6,7 @@
   "features": [
     "One row per host: status, a strip of recent cycles, 24-hour uptime and current latency",
     "Click a row for its 24-hour latency chart with packet loss underneath",
+    "Tags, search and ordering narrow a long list to one site or service, problems first",
     "Paced probing: 5 echo requests per host per minute, spread out, never a burst",
     "Built for many viewers: the page reads cached results and never triggers a ping"
   ],

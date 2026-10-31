@@ -12,6 +12,12 @@ handful of targets once a minute and serves a web page with the last 24 hours.
 - click a row for the 24-hour latency chart (median per cycle, a band of ± the
   cycle's jitter) with packet loss underneath, and the 24-hour average, 95th
   percentile, jitter, best/worst latency, loss and uptime;
+- **tags** on targets (a site, a customer, a service): click tags to show
+  only the targets that have all of them, **find** by name, host or tag, and
+  **order** the list by status (problems first), name, or the 24-hour packet
+  loss, jitter, average or worst latency, either way round. The view lives in
+  the URL fragment (`#tags=dns,ipv6&q=google&sort=loss`), so a filtered view
+  can be bookmarked or sent; the summary at the top still counts every target;
 - add, remove and **pause** targets; **acknowledge** a DOWN target the way
   Nagios does: it shows ACK instead of DOWN until 5 cycles in a row are not DOWN
   again, so the next outage is reported;
@@ -63,12 +69,12 @@ Files are written through a temporary file that is synced to disk before it
 replaces the old one, so a crash or power loss never leaves a truncated list
 or history.
 
-`targets.json` needs only names and hosts; ids, `paused` and `acked` are added
-when the daemon saves it:
+`targets.json` needs only names and hosts; `tags` are optional, and ids,
+`paused` and `acked` are added when the daemon saves it:
 
 ```json
 { "targets": [
-  { "name": "Cloudflare DNS", "host": "1.1.1.1" },
+  { "name": "Cloudflare DNS", "host": "1.1.1.1", "tags": ["dns", "ipv4"] },
   { "name": "Wikipedia", "host": "wikipedia.org" }
 ] }
 ```
@@ -92,8 +98,9 @@ not the expected one is shown as "no data".
 
 | | |
 |---|---|
-| `GET /api/state` | everything the page shows: per target status, flags and the 24 h series `rtt` (ms, median), `jitter` (ms, `null` with fewer than two replies) and `loss` (%), one entry per cycle, oldest first, `null` = no data; carries an ETag, `If-None-Match` gets `304` until the state changes |
-| `POST /api/targets` | add: `{"name": "...", "host": "..."}` |
+| `GET /api/state` | everything the page shows: per target status, flags, tags and the 24 h series `rtt` (ms, median), `jitter` (ms, `null` with fewer than two replies) and `loss` (%), one entry per cycle, oldest first, `null` = no data; carries an ETag, `If-None-Match` gets `304` until the state changes |
+| `POST /api/targets` | add: `{"name": "...", "host": "...", "tags": ["..."]}` (`tags` optional) |
+| `POST /api/targets/ID/tags` | replace the tags: `{"tags": ["dns", "ipv6"]}`; at most 8, each 1-32 characters without spaces or commas, stored lowercase without duplicates |
 | `DELETE /api/targets/ID` | remove |
 | `POST /api/targets/ID/pause`, `/resume` | stop and resume probing |
 | `POST /api/targets/ID/ack`, `/unack` | acknowledge a DOWN target, or withdraw the acknowledgement |

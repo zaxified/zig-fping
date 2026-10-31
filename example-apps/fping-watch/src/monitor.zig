@@ -55,6 +55,8 @@ pub const Target = struct {
     id: u32,
     name: []u8,
     host: []u8,
+    /// Lowercase, unique, at most `max_tags`; the page filters by them.
+    tags: [][]u8 = &.{},
     paused: bool = false,
     acked: bool = false,
     /// Consecutive cycles that were not DOWN while acknowledged.
@@ -76,7 +78,7 @@ pub const Target = struct {
     }
 };
 
-pub const Error = error{ InvalidName, InvalidHost, InvalidScenario, TooManyTargets, UnknownTarget, NotDown };
+pub const Error = error{ InvalidName, InvalidHost, InvalidTags, InvalidScenario, TooManyTargets, UnknownTarget, NotDown };
 
 /// Identifies one version of the web state; the HTTP layer turns it into
 /// an ETag, so a viewer polling between cycles gets `304 Not Modified`.
@@ -88,6 +90,9 @@ pub const StateTag = struct {
 
 /// Upper bound on targets: this is a small demo, not a monitoring system.
 pub const max_targets = 64;
+/// Tags per target, and bytes per tag.
+pub const max_tags = 8;
+pub const max_tag_len = 32;
 
 pub const Monitor = struct {
     gpa: std.mem.Allocator,
@@ -132,6 +137,7 @@ pub const Monitor = struct {
     fn freeTarget(m: *Monitor, t: *Target) void {
         m.gpa.free(t.name);
         m.gpa.free(t.host);
+        freeTags(m.gpa, t.tags);
         m.gpa.destroy(t);
     }
 
@@ -146,18 +152,20 @@ pub const Monitor = struct {
 
     // ----- target management (caller holds no lock) -------------------------
 
-    pub fn add(m: *Monitor, name: []const u8, host: []const u8) (Error || error{OutOfMemory})!u32 {
+    pub fn add(m: *Monitor, name: []const u8, host: []const u8, tags: []const []const u8) (Error || error{OutOfMemory})!u32 {
         try validateName(name);
         try validateHost(host);
+        try validateTags(tags);
         m.mutex.lockUncancelable(m.io);
         defer m.mutex.unlock(m.io);
-        const id = try m.addLocked(m.next_id, name, host);
+        const id = try m.addLocked(m.next_id, name, host, tags);
         m.version += 1;
         m.saveConfigLocked();
         return id;
     }
 
-    fn addLocked(m: *Monitor, id: u32, name: []const u8, host: []const u8) (Error || error{OutOfMemory})!u32 {
+    /// `tags` must have passed `validateTags`.
+    fn addLocked(m: *Monitor, id: u32, name: []const u8, host: []const u8, tags: []const []const u8) (Error || error{OutOfMemory})!u32 {
         if (m.targets.items.len >= max_targets) return error.TooManyTargets;
         const t = try m.gpa.create(Target);
         errdefer m.gpa.destroy(t);
@@ -165,7 +173,9 @@ pub const Monitor = struct {
         errdefer m.gpa.free(name_copy);
         const host_copy = try m.gpa.dupe(u8, host);
         errdefer m.gpa.free(host_copy);
-        t.* = .{ .id = id, .name = name_copy, .host = host_copy };
+        const tags_copy = try dupeTags(m.gpa, tags);
+        errdefer freeTags(m.gpa, tags_copy);
+        t.* = .{ .id = id, .name = name_copy, .host = host_copy, .tags = tags_copy };
         try m.targets.append(m.gpa, t);
         m.next_id = @max(m.next_id, id + 1);
         return id;
@@ -176,6 +186,24 @@ pub const Monitor = struct {
         defer m.mutex.unlock(m.io);
         const i = m.find(id) orelse return error.UnknownTarget;
         m.freeTarget(m.targets.orderedRemove(i));
+        m.version += 1;
+        m.saveConfigLocked();
+    }
+
+    /// Replaces the target's tags.
+    pub fn setTags(m: *Monitor, id: u32, tags: []const []const u8) (Error || error{OutOfMemory})!void {
+        try validateTags(tags);
+        const copy = try dupeTags(m.gpa, tags);
+        m.mutex.lockUncancelable(m.io);
+        defer m.mutex.unlock(m.io);
+        const t = m.targets.items[
+            m.find(id) orelse {
+                freeTags(m.gpa, copy);
+                return error.UnknownTarget;
+            }
+        ];
+        freeTags(m.gpa, t.tags);
+        t.tags = copy;
         m.version += 1;
         m.saveConfigLocked();
     }
@@ -358,12 +386,13 @@ pub const Monitor = struct {
     // ----- persistence ----------------------------------------------------------
 
     /// The on-disk target list. Hand-written files may omit everything but
-    /// `name` and `host`.
+    /// `name` and `host`; a file from 1.0.0 has no `tags`.
     const ConfigFile = struct {
         targets: []const struct {
             id: u32 = 0,
             name: []const u8,
             host: []const u8,
+            tags: []const []const u8 = &.{},
             paused: bool = false,
             acked: bool = false,
             /// A `demo.Scenario` name, used with `--demo`.
@@ -386,8 +415,9 @@ pub const Monitor = struct {
         for (parsed.value.targets) |entry| {
             try validateName(entry.name);
             try validateHost(entry.host);
+            try validateTags(entry.tags);
             const id = if (entry.id != 0 and m.find(entry.id) == null) entry.id else m.next_id;
-            _ = try m.addLocked(id, entry.name, entry.host);
+            _ = try m.addLocked(id, entry.name, entry.host, entry.tags);
             const t = m.targets.items[m.targets.items.len - 1];
             t.paused = entry.paused;
             t.acked = entry.acked;
@@ -405,6 +435,7 @@ pub const Monitor = struct {
             w.print("{s}\n    {{ \"id\": {d}, \"name\": {f}, \"host\": {f}, \"paused\": {}, \"acked\": {}", .{
                 if (i == 0) "" else ",", t.id, std.json.fmt(t.name, .{}), std.json.fmt(t.host, .{}), t.paused, t.acked,
             }) catch return;
+            if (t.tags.len > 0) writeTags(w, t.tags, ", \"tags\": ") catch return;
             if (t.scenario) |sc| w.print(", \"demo\": \"{t}\"", .{sc}) catch return;
             w.writeAll(" }") catch return;
         }
@@ -542,6 +573,7 @@ pub const Monitor = struct {
                     std.json.fmt(t.last_error, .{}), m.demo and t.scenario != null,
                 },
             );
+            try writeTags(w, t.tags, ",\"tags\":");
             try w.writeAll(",\"rtt\":[");
             try m.writeSeries(w, t, newest, .rtt);
             try w.writeAll("],\"jitter\":[");
@@ -600,6 +632,40 @@ fn jitter(rtts: []const u32) u32 {
     var sum: u64 = 0;
     for (rtts[1..], rtts[0 .. rtts.len - 1]) |b, a| sum += @max(a, b) - @min(a, b);
     return @intCast(sum / (rtts.len - 1));
+}
+
+fn writeTags(w: *Io.Writer, tags: []const []const u8, prefix: []const u8) Io.Writer.Error!void {
+    try w.writeAll(prefix);
+    try w.writeByte('[');
+    for (tags, 0..) |tag, i| try w.print("{s}{f}", .{ if (i == 0) "" else ",", std.json.fmt(tag, .{}) });
+    try w.writeByte(']');
+}
+
+/// At most `max_tags` tags of 1 to `max_tag_len` bytes, no control
+/// characters, spaces or commas (the page splits its input on them).
+fn validateTags(tags: []const []const u8) Error!void {
+    if (tags.len > max_tags) return error.InvalidTags;
+    for (tags) |tag| {
+        if (tag.len == 0 or tag.len > max_tag_len) return error.InvalidTags;
+        for (tag) |c| if (c <= 0x20 or c == 0x7f or c == ',') return error.InvalidTags;
+    }
+}
+
+/// A copy of validated `tags`, ASCII-lowercased and without duplicates.
+fn dupeTags(gpa: std.mem.Allocator, tags: []const []const u8) error{OutOfMemory}![][]u8 {
+    var list: std.ArrayList([]u8) = try .initCapacity(gpa, tags.len);
+    errdefer freeTags(gpa, list.items);
+    outer: for (tags) |tag| {
+        for (list.items) |have| if (std.ascii.eqlIgnoreCase(have, tag)) continue :outer;
+        const copy = try gpa.dupe(u8, tag);
+        list.appendAssumeCapacity(std.ascii.lowerString(copy, tag));
+    }
+    return list.toOwnedSlice(gpa);
+}
+
+fn freeTags(gpa: std.mem.Allocator, tags: [][]u8) void {
+    for (tags) |tag| gpa.free(tag);
+    gpa.free(tags);
 }
 
 fn validateName(name: []const u8) Error!void {
@@ -720,7 +786,7 @@ fn fakeCycle(m: *Monitor, id: u32, t: i64, recv: u8) void {
 test "status follows the last sample" {
     var m = testMonitor();
     defer m.deinit();
-    const id = try m.add("a", "192.0.2.1");
+    const id = try m.add("a", "192.0.2.1", &.{});
     const t = m.targets.items[0];
     try testing.expectEqual(.pending, t.status());
     fakeCycle(&m, id, 60, 5);
@@ -738,7 +804,7 @@ test "status follows the last sample" {
 test "acknowledgement needs DOWN and clears after five good cycles" {
     var m = testMonitor();
     defer m.deinit();
-    const id = try m.add("a", "192.0.2.1");
+    const id = try m.add("a", "192.0.2.1", &.{});
     fakeCycle(&m, id, 60, 5);
     try testing.expectError(error.NotDown, m.apply(id, .ack));
     fakeCycle(&m, id, 120, 0);
@@ -757,7 +823,7 @@ test "acknowledgement needs DOWN and clears after five good cycles" {
 test "history keeps 24 hours and reports gaps as null" {
     var m = testMonitor();
     defer m.deinit();
-    const id = try m.add("a", "192.0.2.1");
+    const id = try m.add("a", "192.0.2.1", &.{});
     const t0: i64 = 1_700_000_040; // a cycle boundary
     fakeCycle(&m, id, t0, 5);
     fakeCycle(&m, id, t0 + history_len * 60, 4); // same slot, a day later
@@ -776,7 +842,7 @@ test "the state is built once per change and shared" {
     var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const id = try m.add("a", "192.0.2.1");
+    const id = try m.add("a", "192.0.2.1", &.{});
     const first = try m.stateJson(arena);
     try testing.expectEqual(first.tag, m.stateTag());
     try m.apply(id, .pause);
@@ -821,7 +887,7 @@ test "persistence: missing target list, unusable history, atomic writes" {
     m.read_only = false;
 
     // The first change writes the list (through a synced temporary file).
-    const id = try m.add("a", "192.0.2.1");
+    const id = try m.add("a", "192.0.2.1", &.{});
     const saved = try tmp.dir.readFileAlloc(testing.io, "targets.json", testing.allocator, .limited(4096));
     defer testing.allocator.free(saved);
     try testing.expect(std.mem.find(u8, saved, "\"host\": \"192.0.2.1\"") != null);
@@ -865,7 +931,7 @@ test "demo: sample data before the real hour, real data kept" {
     var m = testMonitor();
     defer m.deinit();
     m.demo = true;
-    const id = try m.add("a", "192.0.2.1");
+    const id = try m.add("a", "192.0.2.1", &.{});
     const t = m.targets.items[0];
     t.scenario = .outage;
     const hour: i64 = 1_700_006_400;
@@ -901,12 +967,69 @@ test "demo: sample data before the real hour, real data kept" {
     try testing.expect(calm7.recv > 0 and calm7.rtt_us >= 3000 and calm7.rtt_us < 10_000);
 }
 
+test "tags: validated, normalized, saved, loaded and served" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buf: [2][128]u8 = undefined;
+    const dir = try std.mem.print(&buf[0], ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const config = try std.mem.print(&buf[1], "{s}/targets.json", .{dir});
+
+    var m: Monitor = .{ .gpa = testing.allocator, .io = testing.io, .config_path = config };
+    defer m.deinit();
+    try testing.expectError(error.InvalidTags, m.add("a", "192.0.2.1", &.{"two words"}));
+    try testing.expectError(error.InvalidTags, m.add("a", "192.0.2.1", &.{"a,b"}));
+    try testing.expectError(error.InvalidTags, m.add("a", "192.0.2.1", &.{""}));
+    const long: [max_tag_len + 1]u8 = @splat('x');
+    try testing.expectError(error.InvalidTags, m.add("a", "192.0.2.1", &.{&long}));
+    const many: [max_tags + 1][]const u8 = @splat("t");
+    try testing.expectError(error.InvalidTags, m.add("a", "192.0.2.1", &many));
+    try testing.expectEqual(0, m.targets.items.len);
+
+    const id = try m.add("a", "192.0.2.1", &.{ "DNS", "praha-1", "dns" });
+    const t = m.targets.items[0];
+    try testing.expectEqual(2, t.tags.len);
+    try testing.expectEqualStrings("dns", t.tags[0]);
+    try testing.expectEqualStrings("praha-1", t.tags[1]);
+
+    try testing.expectError(error.UnknownTarget, m.setTags(id + 1, &.{"x"}));
+    try testing.expectError(error.InvalidTags, m.setTags(id, &.{"a b"}));
+    try testing.expectEqual(2, t.tags.len); // unchanged
+    const before = m.version;
+    try m.setTags(id, &.{ "ipv6", "Core" });
+    try testing.expect(m.version != before);
+    _ = try m.add("b", "192.0.2.2", &.{});
+
+    // Saved with the list (only when there are any), loaded back.
+    const saved = try tmp.dir.readFileAlloc(testing.io, "targets.json", testing.allocator, .limited(4096));
+    defer testing.allocator.free(saved);
+    try testing.expect(std.mem.find(u8, saved, "\"tags\": [\"ipv6\",\"core\"]") != null);
+    try testing.expectEqual(1, std.mem.count(u8, saved, "\"tags\""));
+    var m2: Monitor = .{ .gpa = testing.allocator, .io = testing.io, .config_path = config };
+    defer m2.deinit();
+    try m2.loadConfig();
+    try testing.expectEqualStrings("core", m2.targets.items[0].tags[1]);
+    try testing.expectEqual(0, m2.targets.items[1].tags.len);
+
+    // Served in the state, an empty list included.
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const state = try m2.stateJson(arena_state.allocator());
+    try testing.expect(std.mem.find(u8, state.json, "\"tags\":[\"ipv6\",\"core\"]") != null);
+    try testing.expect(std.mem.find(u8, state.json, "\"tags\":[]") != null);
+
+    // A hand-written list with a bad tag is refused, like a bad host.
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "targets.json", .data = "{\"targets\":[{\"name\":\"a\",\"host\":\"192.0.2.1\",\"tags\":[\"a b\"]}]}" });
+    var m3: Monitor = .{ .gpa = testing.allocator, .io = testing.io, .config_path = config };
+    defer m3.deinit();
+    try testing.expectError(error.InvalidTags, m3.loadConfig());
+}
+
 test "names and hosts are validated" {
     var m = testMonitor();
     defer m.deinit();
-    try testing.expectError(error.InvalidName, m.add("", "192.0.2.1"));
-    try testing.expectError(error.InvalidName, m.add("a\nb", "192.0.2.1"));
-    try testing.expectError(error.InvalidHost, m.add("a", "not a host"));
-    _ = try m.add("v6", "2001:db8::1");
-    _ = try m.add("dns", "example.com");
+    try testing.expectError(error.InvalidName, m.add("", "192.0.2.1", &.{}));
+    try testing.expectError(error.InvalidName, m.add("a\nb", "192.0.2.1", &.{}));
+    try testing.expectError(error.InvalidHost, m.add("a", "not a host", &.{}));
+    _ = try m.add("v6", "2001:db8::1", &.{});
+    _ = try m.add("dns", "example.com", &.{});
 }

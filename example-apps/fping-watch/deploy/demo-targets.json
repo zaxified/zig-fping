@@ -1,12 +1,12 @@
 {
   "targets": [
-    { "id": 1, "name": "Cloudflare DNS", "host": "1.1.1.1", "demo": "evening_congestion" },
-    { "id": 2, "name": "Cloudflare DNS (IPv6)", "host": "2606:4700:4700::1111", "demo": "steady" },
-    { "id": 3, "name": "Google DNS", "host": "8.8.8.8", "demo": "route_change" },
-    { "id": 4, "name": "Google DNS (IPv6)", "host": "2001:4860:4860::8888", "demo": "bufferbloat" },
-    { "id": 5, "name": "Quad9 DNS", "host": "9.9.9.9", "demo": "flapping" },
-    { "id": 6, "name": "Wikimedia (IPv6)", "host": "2a02:ec80:300:ed1a::1", "demo": "outage" },
-    { "id": 7, "name": "NICT NTP, Tokyo", "host": "133.243.238.243", "demo": "long_haul" },
-    { "id": 8, "name": "Branch office VPN", "host": "203.0.113.10", "demo": "down" }
+    { "id": 1, "name": "Cloudflare DNS", "host": "1.1.1.1", "tags": ["dns", "cloudflare", "ipv4"], "demo": "evening_congestion" },
+    { "id": 2, "name": "Cloudflare DNS (IPv6)", "host": "2606:4700:4700::1111", "tags": ["dns", "cloudflare", "ipv6"], "demo": "steady" },
+    { "id": 3, "name": "Google DNS", "host": "8.8.8.8", "tags": ["dns", "google", "ipv4"], "demo": "route_change" },
+    { "id": 4, "name": "Google DNS (IPv6)", "host": "2001:4860:4860::8888", "tags": ["dns", "google", "ipv6"], "demo": "bufferbloat" },
+    { "id": 5, "name": "Quad9 DNS", "host": "9.9.9.9", "tags": ["dns", "ipv4"], "demo": "flapping" },
+    { "id": 6, "name": "Wikimedia (IPv6)", "host": "2a02:ec80:300:ed1a::1", "tags": ["web", "ipv6"], "demo": "outage" },
+    { "id": 7, "name": "NICT NTP, Tokyo", "host": "133.243.238.243", "tags": ["ntp", "asia", "ipv4"], "demo": "long_haul" },
+    { "id": 8, "name": "Branch office VPN", "host": "203.0.113.10", "tags": ["vpn", "ipv4"], "demo": "down" }
   ]
 }
