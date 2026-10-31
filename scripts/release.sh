@@ -1,8 +1,7 @@
 #!/bin/sh
 # Build release artifacts into releases/v<version>/: stripped static
-# binaries for every supported target, tarballs, the fping-watch demo's
-# .deb packages and SHA256SUMS. Runs the full test pipeline first. Works
-# after a plain `git clone` with no sudo (needs dpkg-deb for the packages).
+# binaries for every supported target, tarballs and SHA256SUMS. Runs the
+# full test pipeline first. Works after a plain `git clone` with no sudo.
 #
 # Usage: scripts/release.sh [--skip-tests]
 #
@@ -63,15 +62,7 @@ for target in $TARGETS; do
     tar -C "$OUT/$target/bin" -czf "$OUT/zfping-v$VERSION-$target.tar.gz" zfping zfping.8
 done
 
-# The fping-watch demo's Debian packages; they carry the app's own version
-# (example-apps/fping-watch/build.zig.zon), not the library's.
-if [ "${1:-}" = "--skip-tests" ]; then
-    sh example-apps/fping-watch/package.sh --skip-tests "$OUT"
-else
-    sh example-apps/fping-watch/package.sh "$OUT"
-fi
-
-(cd "$OUT" && sha256sum zfping-*.tar.gz fping-watch_*.deb > SHA256SUMS)
+(cd "$OUT" && sha256sum zfping-*.tar.gz > SHA256SUMS)
 
 # Smoke test the native artifact.
 native="$OUT/$(uname -m)-linux/bin/zfping"
@@ -80,4 +71,4 @@ if [ -x "$native" ]; then
 fi
 
 echo "==> artifacts:"
-ls -l "$OUT"/zfping-*.tar.gz "$OUT"/fping-watch_*.deb "$OUT/SHA256SUMS"
+ls -l "$OUT"/zfping-*.tar.gz "$OUT/SHA256SUMS"

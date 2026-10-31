@@ -199,18 +199,11 @@ while (try pinger.step()) |deadline_mono_ns| {
 }
 ```
 
-### Example application
+### Applications built on it
 
-[`example-apps/fping-watch`](example-apps/fping-watch) is a small ping
-monitor built on the library: a daemon that pings a handful of targets every
-minute and serves a web page with 24 hours of status, latency and loss, with
-pause and Nagios-style acknowledgements, and a `--read-only` mode for public
-demos. It is its own package and shows how a consumer depends on `zig_fping`.
-Every release carries it as a Debian package (`fping-watch_<version>_amd64.deb`,
-`_arm64.deb`): writable on `127.0.0.1:8080` once installed, read-only with
-one setting for a public demo ([Deploying](example-apps/fping-watch#deploying)).
-
-<a href="example-apps/fping-watch"><img src="example-apps/fping-watch/doc/screenshot.png" width="480" alt="fping-watch web page: targets with status, recent cycles, uptime and a latency chart"></a>
+The ping monitor that lived here as `example-apps/fping-watch` (released as
+fping-watch 1.0.0 with v0.2.1) has moved to its own repository and continues
+as **zpinger**, depending on this library as a pinned package.
 
 ## CLI
 
@@ -279,9 +272,8 @@ against the SHA256 pinned in `scripts/zig-env.sh`:
 scripts/test.sh      # fmt check + build + unit + functional + golden-diff
                      #   (unit tests run in a double user namespace via scripts/netns-run,
                      #   and fail on any unexpected skipped test)
-scripts/release.sh   # the above + static binaries for all targets and the
-                     #   fping-watch .deb packages into releases/v<version>/
-                     #   (tar.gz, .deb, SHA256SUMS)
+scripts/release.sh   # the above + static binaries for all targets into
+                     #   releases/v<version>/ (tar.gz, SHA256SUMS)
 scripts/fuzz.sh      # deterministic-seed fuzzing of the parser/option/target harnesses
 ```
 

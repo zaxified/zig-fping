@@ -32,7 +32,12 @@ one network branch causes false DOWN states.
   last release for Zig 0.16 — no fixes planned for that line; `main` moves
   to Zig 0.17), **v0.2.0** (2026-10-18, first release for Zig 0.17: audit
   fixes, golden vs fping 5.5, fuzz driver, API hardening, `fping-watch`
-  example). See CHANGELOG.md.
+  example), **v0.2.1** (2026-10-28, fping-watch 1.0.0 as a .deb; no library
+  change). See CHANGELOG.md.
+- `fping-watch` left this repository on 2026-10-31: it continues as
+  **zpinger**, its own repository owned by the CML session (`~/CML`). This
+  repo is the fping port only (and inspiration for zig-libs modules); do not
+  add application features here.
 
 ## Upstream tracking (fping → zig-fping)
 

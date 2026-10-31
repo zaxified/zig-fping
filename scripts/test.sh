@@ -27,7 +27,7 @@ cd "$REPO_ROOT"
 ZFPING_BIN="${1:-}"
 
 echo "==> zig fmt --check"
-"$ZIG" fmt --check src build.zig example-apps
+"$ZIG" fmt --check src build.zig
 
 if [ -z "$ZFPING_BIN" ]; then
     echo "==> zig build (ReleaseSafe)"
@@ -93,10 +93,5 @@ else
         exit 1
     fi
 fi
-
-# The example app is its own package (it depends on this checkout by path):
-# its unit tests, then the daemon end to end against loopback targets.
-echo "==> example-apps/fping-watch (ReleaseSafe)"
-(cd example-apps/fping-watch && "$ZIG" build test --summary all && "$ZIG" build && sh smoke.sh)
 
 echo "==> all checks passed"

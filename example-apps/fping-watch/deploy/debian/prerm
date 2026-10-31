@@ -1,7 +1,0 @@
-#!/bin/sh
-# On removal stop the service; an upgrade restarts it in postinst instead.
-set -e
-if [ "$1" = remove ] && [ -d /run/systemd/system ]; then
-    deb-systemd-invoke stop fping-watch.service >/dev/null || true
-fi
-exit 0
