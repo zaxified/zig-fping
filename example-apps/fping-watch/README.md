@@ -18,9 +18,9 @@ handful of targets once a minute and serves a web page with the last 24 hours.
   uses too. Both editors work alike: Enter or a click outside saves what
   changed, Esc drops it. An IP address ticks the `ipv4` or `ipv6` tag of a
   new target, and moving a target between the two swaps it;
-- **status pills** that count and filter: `ok` and `not ok` (needs attention:
+- **status pills** that count and filter: `ok` and `nok` (needs attention:
   DOWN, losing probes now, or a problem in the last hour; see below), then the
-  status now (`up`, `loss`, `down`, `ack`, `pending`, `paused`), all shown
+  status now (`up`, `down`, `loss`, `ack`, `pending`, `paused`), all shown
   even at 0. A click shows only that group, several show any of them; they
   count what the tags and the search leave;
 - **tags** on targets (a site, a customer, a service): click tags to show only the targets that have all of
@@ -96,14 +96,14 @@ The default order, the most urgent on top:
 
 1. DOWN (not acknowledged);
 2. LOSS: the last cycle lost some probes;
-3. a problem in the last hour: a lost probe, or a cycle with 10 ms of jitter
-   or more;
+3. a problem in the last hour: 1 % packet loss or 10 ms of jitter on
+   average, or more (one lost probe in an hour is not a problem);
 4. such a problem in the last 24 hours;
 5. ACK: an acknowledged outage, known and so below the unknown ones;
 6. the rest, then PENDING, then PAUSED.
 
 Within a tier, more packet loss and then more jitter go first, the last hour
-before the last 24 hours. The first three tiers are the `not ok` pill; tiers
+before the last 24 hours. The first three tiers are the `nok` pill; tiers
 4 and 6 (the rest that has been probed) are `ok`.
 
 ## How a cycle works

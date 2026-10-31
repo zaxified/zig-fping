@@ -19,9 +19,9 @@
   file. The package ships `/usr/share/fping-watch/demo-targets.json`:
   public IPv4 and IPv6 targets, the DOWN one in 203.0.113.0/24 (RFC 5737).
   `/healthz` reports `demo`.
-- **Status pills filter the list**: `ok` and `not ok` (DOWN, LOSS now, or a
+- **Status pills filter the list**: `ok` and `nok` (DOWN, LOSS now, or a
   problem in the last hour, unacknowledged: the first tiers of problems
-  first), then `up`, `loss`, `down`, `ack`, `pending` and `paused`, every
+  first), then `up`, `down`, `loss`, `ack`, `pending` and `paused`, every
   one shown even at 0. A click shows only that group, several pills show any
   of them (and the tags and search still apply); the counts follow the tags
   and the search, like a shop's search facets. Kept in the fragment
@@ -39,7 +39,7 @@
   match), and an order: name, the packet loss, jitter, average or worst
   latency of the last hour or the last 24 hours, or problems first (default:
   DOWN, LOSS now, a problem in the last hour, one in the last 24 hours, ACK,
-  the rest; a problem is a lost probe or a cycle with 10 ms of jitter or
+  the rest; a problem is 1 % packet loss or 10 ms of jitter on average, or
   more; within a tier more loss, then more jitter), with a button to reverse
   it; targets without data stay last. The view is kept in the URL fragment
   (`#open=3&tags=dns,ipv6&q=google&sort=loss1h&rev=1`, the old `#3,5` still

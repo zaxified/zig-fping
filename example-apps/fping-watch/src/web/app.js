@@ -13,10 +13,10 @@ let state = null;
 // (see healthOf), then the status now.
 const PILLS = {
   ok: ["ok", "var(--up)", "Probed, and no problem in the last hour"],
-  nok: ["not ok", "var(--down)", "Needs attention: DOWN, losing probes now, or a problem in the last hour (a lost probe, or 10 ms of jitter or more); acknowledged outages are not counted"],
+  nok: ["nok", "var(--down)", "Needs attention: DOWN, losing probes now, or a problem in the last hour (1 % packet loss or 10 ms of jitter on average, or more); acknowledged outages are not counted"],
   up: ["up", "var(--up)", "Every probe of the last cycle answered"],
-  degraded: ["loss", "var(--warn)", "Some probes of the last cycle lost"],
   down: ["down", "var(--down)", "Every probe of the last cycle lost"],
+  degraded: ["loss", "var(--warn)", "Some probes of the last cycle lost"],
   acked: ["ack", "var(--ack)", "DOWN, and acknowledged"],
   pending: ["pending", "var(--paused)", "Not probed yet"],
   paused: ["paused", "var(--paused)", "Not probed: paused"],
@@ -137,7 +137,6 @@ function summarize(t, cycles = t.rtt.length) {
     max: rtts.length ? Math.max(...rtts) : null,
     p95: percentile(rtts, 95),
     jitter: mean(jitters),
-    jitterMax: jitters.length ? Math.max(...jitters) : null,
     loss: mean(losses),
     last,
     lastJitter,
@@ -277,10 +276,12 @@ function matches(t) {
   return view.q.toLowerCase().split(/\s+/).filter(Boolean).every((w) => hay.some((h) => h.includes(w)));
 }
 
-// A window had a problem when a probe was lost or a cycle's jitter reached
-// this (milliseconds).
+// A window had a problem when it lost this much on average (percent), or its
+// mean jitter reached this (milliseconds): how much, not whether at all, so
+// one lost probe in an hour is not a problem.
+const LOSS_WARN_PCT = 1;
 const JITTER_WARN_MS = 10;
-const troubled = (s) => s.loss > 0 || s.jitterMax >= JITTER_WARN_MS;
+const troubled = (s) => s.loss >= LOSS_WARN_PCT || s.jitter >= JITTER_WARN_MS;
 
 // Problems first, the most urgent on top: DOWN, LOSS now, a problem in the
 // last hour, one in the last 24 hours, an acknowledged outage (known, so
