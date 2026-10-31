@@ -40,16 +40,19 @@ function saveView() {
   history.replaceState(null, "", hash ? `#${hash}` : location.pathname + location.search);
 }
 
-// The open tag picker, kept across re-renders (a new cycle redraws the list
-// while someone picks): target id, the tags ticked so far, the list order
-// fixed when it opened, the filter text. tagNote: why the last change failed.
+// The open editors, kept across re-renders (a new cycle redraws the list
+// while someone types). The tag picker: whose tags (a target id, or "new"
+// for the add form), the tags ticked so far, the list order fixed when it
+// opened, the filter text. The name and host editor: the fields as typed.
 let editing = null; // { id, selected: Set, order: [], filter }
-let tagNote = null; // { id, text }
-// The open name/host editor, kept across re-renders the same way.
-let renaming = null; // { id, name, host, note }
+let renaming = null; // { id, name, host, note, saving }
+// Why the last change of a row failed, shown under its name.
+let rowNote = null; // { id, text }
+// The add form's tags; `auto` is the ipv4/ipv6 tag it ticked by itself for
+// the host typed, `refused` one the user unticked (not ticked again).
+let adding = { tags: [], auto: null, refused: null };
 const MAX_TAGS = 8, MAX_TAG_LEN = 32;
 
-const splitTags = (text) => text.split(/[\s,]+/).filter(Boolean);
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const el = (tag, cls, text) => {
@@ -211,12 +214,13 @@ function render() {
     list.append(p);
   }
   for (const show of expand) show();
+  renderAddTags();
   if (refocus) focusRow(refocus.id, refocus.key, refocus.caret);
   if (window.scrollY !== y) window.scrollTo(0, y);
 }
 
 function focusRow(id, key, caret) {
-  const e = $(`#targets [data-target="${id}"] [data-focus="${key}"]`);
+  const e = $(`[data-target="${id}"] [data-focus="${key}"]`);
   if (!e) return;
   e.focus({ preventScroll: true });
   if (caret) e.setSelectionRange(...caret);
@@ -231,7 +235,7 @@ const filtered = () => view.tags.size > 0 || view.q !== "";
 function matches(t) {
   for (const tag of view.tags) if (!t.tags.includes(tag)) return false;
   const hay = [t.name, t.host, ...t.tags].map((s) => s.toLowerCase());
-  return splitTags(view.q.toLowerCase()).every((w) => hay.some((h) => h.includes(w)));
+  return view.q.toLowerCase().split(/\s+/).filter(Boolean).every((w) => hay.some((h) => h.includes(w)));
 }
 
 // A window had a problem when a probe was lost or a cycle's jitter reached
@@ -354,6 +358,7 @@ function renderTarget(t, s, expand) {
     $(".host", node).textContent = t.host;
     $(".edit-target", node).addEventListener("click", () => openRename(t));
     renderTagLine($(".tagline", node), t);
+    if (rowNote && rowNote.id === t.id) who.append(el("span", "row-note", rowNote.text));
   }
   $(".uptime", node).textContent = s.uptime === null ? "–" : `${s.uptime.toFixed(s.uptime === 100 ? 0 : 2)} %`;
   $(".latency", node).textContent = t.paused ? "–" : ms(s.last);
@@ -447,32 +452,84 @@ function renderDetail(detail, t, s) {
   actions.append(note);
 }
 
-// ----- name and host editor --------------------------------------------------------
+// ----- editors ----------------------------------------------------------------------
+//
+// Both editors work alike: Enter or a click outside closes the editor and
+// saves what changed (nothing changed: nothing to save), Escape closes it and
+// drops the changes.
+
+const EDIT_HINT = "Enter or a click outside saves, Esc cancels";
+
+// The tag a literal address implies, or null (a DNS name may be either).
+const familyTag = (host) =>
+  /^\d{1,3}(\.\d{1,3}){3}$/.test(host) ? "ipv4" : host.includes(":") && /^[0-9a-f:.]+(%\S+)?$/i.test(host) ? "ipv6" : null;
+
+document.addEventListener("pointerdown", (ev) => {
+  if (renaming && !ev.target.closest(".who-editor")) closeRename(true, false);
+  if (editing && !ev.target.closest(".tag-popover, .edit-tags, .add-tags")) closeTagPicker(true, false);
+});
+
+// ----- name and host editor -----------------------------------------------------------
 
 function openRename(t) {
-  if (editing) closeTagPicker();
-  renaming = { id: t.id, name: t.name, host: t.host, note: "" };
+  if (editing) closeTagPicker(true, false);
+  renaming = { id: t.id, name: t.name, host: t.host, note: "", saving: false };
+  rowNote = null;
   render();
   focusRow(t.id, "rename-name", [0, t.name.length]);
 }
 
-function closeRename() {
-  const id = renaming && renaming.id;
-  renaming = null;
-  render();
-  if (id !== null) focusRow(id, "edit-target");
+// A new host keeps the history but starts over as PENDING (the server
+// drops the status and any acknowledgement); moving between an IPv4 and an
+// IPv6 address swaps the ipv4/ipv6 tag too.
+async function closeRename(save, refocus) {
+  const r = renaming;
+  if (!r || r.saving) return;
+  const t = state.targets.find((x) => x.id === r.id);
+  const change = {};
+  if (save && t) {
+    const name = r.name.trim(), host = r.host.trim();
+    if (name !== t.name) change.name = name;
+    if (host !== t.host) {
+      change.host = host;
+      const from = familyTag(t.host), to = familyTag(host);
+      if (from && to && from !== to && t.tags.includes(from) && !t.tags.includes(to))
+        change.tags = t.tags.map((x) => (x === from ? to : x));
+    }
+  }
+  const done = () => {
+    renaming = null;
+    render();
+    if (refocus) focusRow(r.id, "edit-target");
+  };
+  if (Object.keys(change).length === 0) return done();
+  r.saving = true;
+  try {
+    await call("PATCH", `api/targets/${r.id}`, change);
+    done();
+  } catch (err) {
+    r.saving = false;
+    // A demo refuses every change: say so and close. A bad name or host
+    // keeps the editor open, so nothing typed is lost.
+    if (state.read_only) {
+      rowNote = { id: r.id, text: err.message };
+      return done();
+    }
+    r.note = err.message;
+    render();
+    if (refocus) focusRow(r.id, "rename-host");
+  }
 }
 
-// In place of the name and host; a new host keeps the history but starts
-// over as PENDING (the server drops the status and any acknowledgement).
+// In place of the name and host.
 function renderRenameEditor(t) {
   const form = el("form", "who-editor");
   form.addEventListener("click", (ev) => ev.stopPropagation());
   form.setAttribute("aria-label", `Rename ${t.name}`);
-  const field = (key, value, placeholder, maxLength, title) => {
+  const field = (key, placeholder, maxLength, title) => {
     const input = el("input");
     input.dataset.focus = `rename-${key}`;
-    input.value = value;
+    input.value = renaming[key];
     input.placeholder = placeholder;
     input.maxLength = maxLength;
     input.required = true;
@@ -481,83 +538,85 @@ function renderRenameEditor(t) {
     input.addEventListener("input", () => (renaming[key] = input.value));
     return input;
   };
-  const name = field("name", renaming.name, "Name", 64, "Shown in the list");
-  const host = field("host", renaming.host, "IP address or host name", 253,
+  const name = field("name", "Name", 64, "Shown in the list");
+  const host = field("host", "IP address or host name", 253,
     "A new host keeps the history; the status starts over and an acknowledgement is dropped");
-  const save = el("button", "primary", "Save");
-  save.type = "submit";
-  const cancel = el("button", null, "Cancel");
-  cancel.type = "button";
-  cancel.addEventListener("click", closeRename);
-  const note = el("span", "row-note", renaming.note);
-  form.addEventListener("submit", async (ev) => {
+  // A form, so Enter submits from either field; no buttons, like the picker.
+  form.addEventListener("submit", (ev) => {
     ev.preventDefault();
-    const change = {};
-    if (renaming.name.trim() !== t.name) change.name = renaming.name.trim();
-    if (renaming.host.trim() !== t.host) change.host = renaming.host.trim();
-    if (Object.keys(change).length === 0) return closeRename();
-    const id = renaming.id;
-    try {
-      await call("PATCH", `api/targets/${id}`, change);
-      closeRename();
-    } catch (err) {
-      if (renaming && renaming.id === id) renaming.note = err.message;
-      render();
-    }
+    closeRename(true, true);
   });
   form.addEventListener("keydown", (ev) => {
-    if (ev.key === "Escape") closeRename();
+    if (ev.key === "Escape") closeRename(false, true);
   });
-  form.append(name, host, save, cancel, note);
+  form.append(name, host, el("span", renaming.note ? "row-note error" : "row-note", renaming.note || EDIT_HINT));
   return form;
 }
 
 // ----- tag picker ------------------------------------------------------------------
 //
 // Like GitHub's label picker: the edit button next to the tags opens a list
-// of every tag in use with a tick per tag of this target, a filter that also
-// creates a new tag, and the change is saved when the list closes (Escape,
-// a click outside, or the button again).
+// of every tag in use with a tick per tag of this target, and a filter that
+// also creates a new tag. The add form uses the same picker for the target
+// it is about to add ("new"), whose tags stay in the form until it is sent.
 
-// The tags in the head, their edit button and, when open, the picker.
-function renderTagLine(line, t) {
+// The tags, their edit button and, when open, the picker. `owner` is a
+// target, or { id: "new", tags } for the add form.
+function renderTagLine(line, owner) {
   const tags = $(".tags", line);
-  for (const tag of t.tags) tags.append(el("span", view.tags.has(tag) ? "rtag on" : "rtag", tag));
-  tags.hidden = t.tags.length === 0;
-  const isOpen = editing !== null && editing.id === t.id;
+  tags.replaceChildren();
+  for (const tag of owner.tags) tags.append(el("span", view.tags.has(tag) ? "rtag on" : "rtag", tag));
+  tags.hidden = owner.tags.length === 0;
+  const isOpen = editing !== null && editing.id === owner.id;
   const button = $(".edit-tags", line);
-  button.textContent = t.tags.length ? "✎" : "+ tags";
-  button.classList.toggle("empty", t.tags.length === 0);
+  button.textContent = owner.tags.length ? "✎" : "+ tags";
+  button.classList.toggle("empty", owner.tags.length === 0);
   button.setAttribute("aria-expanded", String(isOpen));
-  button.addEventListener("click", () => (isOpen ? closeTagPicker() : openTagPicker(t)));
-  if (tagNote && tagNote.id === t.id) line.after(el("span", "row-note", tagNote.text));
-  if (isOpen) line.append(renderTagPicker(t));
+  button.onclick = (ev) => {
+    ev.stopPropagation();
+    toggleTagPicker(owner);
+  };
+  $(".tag-popover", line)?.remove();
+  if (isOpen) line.append(renderTagPicker(owner));
 }
 
-function openTagPicker(t) {
-  if (editing) closeTagPicker();
-  renaming = null;
-  const others = [...new Set(state.targets.flatMap((x) => x.tags))].filter((tag) => !t.tags.includes(tag));
+const toggleTagPicker = (owner) =>
+  editing !== null && editing.id === owner.id ? closeTagPicker(true, true) : openTagPicker(owner);
+
+// The add form's tag line, outside the list.
+const newOwner = () => ({ id: "new", name: "the new target", tags: adding.tags });
+const renderAddTags = () => renderTagLine($("#add-tags .tagline"), newOwner());
+const redraw = () => (state ? render() : renderAddTags());
+
+function openTagPicker(owner) {
+  if (renaming) closeRename(true, false);
+  if (editing) closeTagPicker(true, false);
+  const inUse = state ? state.targets.flatMap((x) => x.tags) : [];
+  const others = [...new Set([...inUse, ...adding.tags])].filter((tag) => !owner.tags.includes(tag));
   const byTag = (a, b) => a.localeCompare(b, undefined, { numeric: true });
-  editing = { id: t.id, selected: new Set(t.tags), order: [...[...t.tags].sort(byTag), ...others.sort(byTag)], filter: "" };
-  tagNote = null;
-  render();
-  focusRow(t.id, "tag-filter");
+  editing = { id: owner.id, selected: new Set(owner.tags), order: [...[...owner.tags].sort(byTag), ...others.sort(byTag)], filter: "" };
+  rowNote = null;
+  redraw();
+  focusRow(owner.id, "tag-filter");
 }
 
-async function closeTagPicker() {
+async function closeTagPicker(save, refocus) {
   const e = editing;
   if (!e) return;
   editing = null;
-  const t = state.targets.find((x) => x.id === e.id);
   const tags = [...e.selected];
-  const changed = t && (tags.length !== t.tags.length || tags.some((tag) => !t.tags.includes(tag)));
-  render();
-  if (!changed) return;
+  if (save && e.id === "new") {
+    if (adding.auto && !e.selected.has(adding.auto)) [adding.refused, adding.auto] = [adding.auto, null];
+    adding.tags = tags;
+  }
+  redraw();
+  if (refocus) focusRow(e.id, "edit-tags");
+  const t = save && e.id !== "new" && state.targets.find((x) => x.id === e.id);
+  if (!t || (tags.length === t.tags.length && tags.every((tag) => t.tags.includes(tag)))) return;
   try {
     await call("POST", `api/targets/${e.id}/tags`, { tags });
   } catch (err) {
-    tagNote = { id: e.id, text: err.message };
+    rowNote = { id: e.id, text: err.message };
     render();
   }
 }
@@ -566,12 +625,12 @@ async function closeTagPicker() {
 const tagProblem = (text) =>
   text.length > MAX_TAG_LEN ? `At most ${MAX_TAG_LEN} characters` : /[\s,]/.test(text) ? "No spaces or commas" : null;
 
-function renderTagPicker(t) {
+function renderTagPicker(owner) {
   const pop = el("div", "tag-popover");
   pop.addEventListener("click", (ev) => ev.stopPropagation());
   pop.setAttribute("role", "dialog");
-  pop.setAttribute("aria-label", `Tags of ${t.name}`);
-  const title = el("div", "pop-title", "Apply tags to this target");
+  pop.setAttribute("aria-label", `Tags of ${owner.name}`);
+  const title = el("div", "pop-title", owner.id === "new" ? "Tags of the new target" : "Apply tags to this target");
   const input = el("input", "tag-input");
   input.dataset.focus = "tag-filter";
   input.placeholder = "Filter or create a tag";
@@ -597,7 +656,8 @@ function renderTagPicker(t) {
     editing.filter = input.value = "";
     fill();
   };
-  // What Enter does: the exact match, the only match, or a new tag.
+  // What Enter does: the exact match, the only match, or a new tag; with
+  // an empty filter, close and save.
   let enter = null;
   const fill = () => {
     const q = editing.filter.trim().toLowerCase();
@@ -631,36 +691,35 @@ function renderTagPicker(t) {
       list.append(li);
     }
     if (!shown.length && !canCreate && !problem) list.append(el("li", "pop-empty", "No tags yet: type one"));
-    enter = editing.order.includes(q) ? () => toggle(q) : canCreate ? () => create(q) : shown.length === 1 ? () => toggle(shown[0]) : null;
-    note.textContent = problem || (full ? `At most ${MAX_TAGS} tags per target` : "");
+    enter = q === "" ? () => closeTagPicker(true, true)
+      : editing.order.includes(q) ? () => toggle(q) : canCreate ? () => create(q) : shown.length === 1 ? () => toggle(shown[0]) : null;
+    note.textContent = problem || (full ? `At most ${MAX_TAGS} tags per target` : EDIT_HINT);
   };
   input.addEventListener("input", () => {
     editing.filter = input.value;
     fill();
   });
   input.addEventListener("keydown", (ev) => {
-    if (ev.key === "Enter" && enter) {
-      ev.preventDefault();
+    if (ev.key === "Enter") {
+      ev.preventDefault(); // in the add form, Enter would send it
+      if (!enter) return;
+      const close = editing.filter.trim() === "";
       enter();
+      if (close) return;
       editing.filter = input.value = "";
       fill();
     }
   });
   pop.addEventListener("keydown", (ev) => {
     if (ev.key === "Escape") {
-      closeTagPicker();
-      focusRow(t.id, "edit-tags");
+      ev.preventDefault();
+      closeTagPicker(false, true);
     }
   });
   fill();
   pop.append(title, input, list, note);
   return pop;
 }
-
-// A click anywhere but the picker or its gear closes it, and saves.
-document.addEventListener("pointerdown", (ev) => {
-  if (editing && !ev.target.closest(".tag-popover, .edit-tags")) closeTagPicker();
-});
 
 function renderChart(box, t) {
   const W = Math.max(300, box.clientWidth || 600);
@@ -760,13 +819,34 @@ $("#add").addEventListener("submit", async (ev) => {
   const form = ev.target;
   $("#add-error").textContent = "";
   try {
-    await call("POST", "api/targets", { name: form.name.value.trim(), host: form.host.value.trim(), tags: splitTags(form.tags.value) });
+    await call("POST", "api/targets", { name: form.name.value.trim(), host: form.host.value.trim(), tags: adding.tags });
     form.reset();
+    adding = { tags: [], auto: null, refused: null };
+    renderAddTags();
   } catch (err) {
     $("#add-error").textContent = err.message;
     $("#add-error").classList.toggle("demo", state.read_only);
   }
 });
+
+// The host decides the ipv4/ipv6 tag, until the user unticks it.
+$("#add").host.addEventListener("input", (ev) => {
+  const want = familyTag(ev.target.value.trim());
+  if (adding.auto && adding.auto !== want) {
+    adding.tags = adding.tags.filter((tag) => tag !== adding.auto);
+    adding.auto = null;
+  }
+  if (want && want !== adding.refused && !adding.tags.includes(want) && adding.tags.length < MAX_TAGS) {
+    adding.tags = [...adding.tags, want];
+    adding.auto = want;
+  }
+  renderAddTags();
+});
+// The whole tag box opens the picker, not just its button.
+$("#add-tags").addEventListener("click", (ev) => {
+  if (!ev.target.closest(".tag-popover")) toggleTagPicker(newOwner());
+});
+renderAddTags();
 
 // Only a new width changes the layout. A mobile browser resizes the height
 // whenever its toolbar slides in or out during scrolling; re-rendering on that

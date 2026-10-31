@@ -59,7 +59,7 @@ header {
 .pill::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--c); }
 
 .toolbar { display: flex; flex-wrap: wrap; gap: 8px 10px; align-items: center; margin-bottom: 14px; }
-#find, #sort, #order, .tag-popover .tag-input {
+#find, #sort, #order {
   padding: 6px 10px; border-radius: 8px;
   border: 1px solid var(--line); background: var(--card); color: var(--text);
 }
@@ -126,17 +126,30 @@ header {
 .edit-tags.empty { border: 1px dashed var(--line); }
 .row-note { font-size: 12px; color: var(--muted); margin-top: 3px; white-space: normal; }
 .row-note:empty { display: none; }
+.row-note.error { color: var(--down); }
 .who-editor { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
-.who-editor input {
+.who-editor .row-note { flex-basis: 100%; }
+/* Every editing field alike: filled, with the accent while focused. */
+.who-editor input, .tag-popover .tag-input {
   flex: 1 1 160px; min-width: 0; padding: 5px 9px; border-radius: 8px;
   border: 1px solid var(--line); background: var(--bg); color: var(--text);
 }
-.who-editor button {
-  padding: 5px 12px; border-radius: 8px; cursor: pointer;
-  border: 1px solid var(--line); background: var(--bg); color: var(--text);
+.who-editor input:focus, .tag-popover .tag-input:focus {
+  outline: none; border-color: var(--accent); background: var(--card);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent);
 }
-.who-editor button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-.who-editor .row-note { flex-basis: 100%; }
+
+/* The add form's tags: a box like its inputs, the picker under it. */
+.add-tags {
+  flex: 1 1 180px; position: relative; cursor: pointer; min-height: 36px;
+  display: flex; align-items: center; padding: 4px 8px; border-radius: 8px;
+  border: 1px solid var(--line); background: var(--card);
+}
+.add-tags:hover { border-color: var(--accent); }
+.add-tags .tagline { margin-top: 0; position: static; flex-wrap: wrap; }
+.add-tags .tags { flex-wrap: wrap; }
+.add-tags .edit-btn { opacity: 1; }
+.add-tags .tag-popover { top: calc(100% + 4px); }
 
 .beats { display: flex; gap: 3px; justify-content: flex-end; min-width: 0; overflow: hidden; height: 26px; }
 .beat { flex: 0 0 6px; border-radius: 3px; background: var(--c, var(--empty)); }
@@ -169,11 +182,11 @@ header {
 .actions:empty { display: none; }
 
 button, input { font: inherit; }
-.actions button, .add button {
+.actions button, .add > button {
   padding: 6px 14px; border-radius: 8px; cursor: pointer;
   border: 1px solid var(--line); background: var(--bg); color: var(--text);
 }
-.actions button:hover, .add button:hover { border-color: var(--accent); }
+.actions button:hover, .add > button:hover { border-color: var(--accent); }
 .actions .danger { color: var(--down); }
 .note { color: var(--muted); font-size: 13px; align-self: center; }
 
@@ -204,7 +217,7 @@ button, input { font: inherit; }
   flex: 1 1 180px; padding: 7px 10px; border-radius: 8px;
   border: 1px solid var(--line); background: var(--card); color: var(--text);
 }
-.add button { background: var(--accent); border-color: var(--accent); color: #fff; }
+.add > button { background: var(--accent); border-color: var(--accent); color: #fff; }
 .error { color: var(--down); font-size: 13px; flex-basis: 100%; }
 .error:empty { display: none; }
 .error.demo { color: var(--muted); }

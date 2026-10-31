@@ -36,7 +36,9 @@
     <form id="add" class="add">
       <input name="name" title="Shown in the list" placeholder="Name" maxlength="64" required>
       <input name="host" title="IPv4 or IPv6 address, or a DNS name (resolved every cycle)" placeholder="IP address or host name" maxlength="253" required>
-      <input name="tags" title="Optional labels to filter the list by, separated by spaces (at most 8)" placeholder="Tags (optional)" maxlength="300">
+      <div id="add-tags" class="add-tags" data-target="new" title="Optional labels to filter the list by (at most 8); an IP address ticks ipv4 or ipv6">
+        <span class="line tagline"><span class="tags"></span><button class="edit-btn edit-tags" type="button" data-focus="edit-tags" aria-label="Tags of the new target"></button></span>
+      </div>
       <button type="submit" title="Start probing this host once a minute">Add target</button>
       <span id="add-error" class="error" role="alert"></span>
     </form>

@@ -208,13 +208,16 @@ pub const Monitor = struct {
         m.saveConfigLocked();
     }
 
-    /// Renames the target and/or moves it to another host (null: keep). A new
-    /// host keeps the history but not the current status: the target is
-    /// PENDING until the next cycle, and an acknowledgement is dropped (it was
-    /// for the old host).
-    pub fn edit(m: *Monitor, id: u32, name: ?[]const u8, host: ?[]const u8) (Error || error{OutOfMemory})!void {
+    /// Renames the target, moves it to another host and/or replaces its tags
+    /// (null: keep), all or nothing. A new host keeps the history but not the
+    /// current status: the target is PENDING until the next cycle, and an
+    /// acknowledgement is dropped (it was for the old host).
+    pub fn edit(m: *Monitor, id: u32, name: ?[]const u8, host: ?[]const u8, tags: ?[]const []const u8) (Error || error{OutOfMemory})!void {
         if (name) |n| try validateName(n);
         if (host) |h| try validateHost(h);
+        if (tags) |t| try validateTags(t);
+        const tags_copy = if (tags) |t| try dupeTags(m.gpa, t) else null;
+        errdefer if (tags_copy) |t| freeTags(m.gpa, t);
         const name_copy = if (name) |n| try m.gpa.dupe(u8, n) else null;
         errdefer if (name_copy) |n| m.gpa.free(n);
         const host_copy = if (host) |h| try m.gpa.dupe(u8, h) else null;
@@ -225,6 +228,10 @@ pub const Monitor = struct {
         if (name_copy) |n| {
             m.gpa.free(t.name);
             t.name = n;
+        }
+        if (tags_copy) |c| {
+            freeTags(m.gpa, t.tags);
+            t.tags = c;
         }
         if (host_copy) |h| {
             if (std.mem.eql(u8, h, t.host)) {
@@ -1068,22 +1075,25 @@ test "edit: rename, move to another host, refuse bad input" {
     fakeCycle(&m, id, 60, 0);
     try m.apply(id, .ack);
 
-    try testing.expectError(error.InvalidName, m.edit(id, "", null));
-    try testing.expectError(error.InvalidHost, m.edit(id, null, "not a host"));
-    try testing.expectError(error.UnknownTarget, m.edit(id + 1, "b", null));
+    try testing.expectError(error.InvalidName, m.edit(id, "", null, null));
+    try testing.expectError(error.InvalidHost, m.edit(id, null, "not a host", null));
+    try testing.expectError(error.UnknownTarget, m.edit(id + 1, "b", null, null));
+    // All or nothing: a bad tag keeps the good name out too.
+    try testing.expectError(error.InvalidTags, m.edit(id, "b", null, &.{"a b"}));
     try testing.expectEqualStrings("a", t.name);
 
     // A new name keeps everything else.
-    try m.edit(id, "router", null);
+    try m.edit(id, "router", null, null);
     try testing.expectEqualStrings("router", t.name);
     try testing.expect(t.acked);
     try testing.expectEqual(.down, t.status());
     // The same host again changes nothing.
-    try m.edit(id, null, "192.0.2.1");
+    try m.edit(id, null, "192.0.2.1", null);
     try testing.expect(t.acked);
 
-    // A new host: history kept, status and acknowledgement not.
-    try m.edit(id, null, "192.0.2.2");
+    // A new host: history kept, status and acknowledgement not; tags with it.
+    try m.edit(id, null, "192.0.2.2", &.{"IPv4"});
+    try testing.expectEqualStrings("ipv4", t.tags[0]);
     try testing.expectEqualStrings("192.0.2.2", t.host);
     try testing.expectEqual(.pending, t.status());
     try testing.expect(!t.acked);

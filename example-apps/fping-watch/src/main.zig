@@ -310,7 +310,7 @@ fn route(monitor: *Monitor, req: *http.Server.Request, arena: std.mem.Allocator)
         return send(req, .created, "application/json", try arena.print("{{\"id\":{d}}}", .{id}));
     }
 
-    // DELETE /api/targets/ID, PATCH /api/targets/ID {"name": ..., "host": ...},
+    // DELETE /api/targets/ID, PATCH /api/targets/ID {"name": ..., "host": ..., "tags": [...]},
     // POST /api/targets/ID/{pause,resume,ack,unack},
     // POST /api/targets/ID/tags {"tags": [...]}
     var parts = std.mem.tokenizeScalar(u8, path["/api/targets".len..], '/');
@@ -320,11 +320,11 @@ fn route(monitor: *Monitor, req: *http.Server.Request, arena: std.mem.Allocator)
     if (method == .DELETE and verb == null) {
         monitor.remove(id) catch |err| return sendMonitorError(req, err);
     } else if (method == .PATCH and verb == null) {
-        const Edit = struct { name: ?[]const u8 = null, host: ?[]const u8 = null };
+        const Edit = struct { name: ?[]const u8 = null, host: ?[]const u8 = null, tags: ?[]const []const u8 = null };
         const body = try readBody(req, arena);
         const parsed = std.json.parseFromSliceLeaky(Edit, arena, body, .{}) catch
-            return sendError(req, .bad_request, "expected {\"name\": ..., \"host\": ...}");
-        monitor.edit(id, parsed.name, parsed.host) catch |err| return sendMonitorError(req, err);
+            return sendError(req, .bad_request, "expected {\"name\": ..., \"host\": ..., \"tags\": [...]}");
+        monitor.edit(id, parsed.name, parsed.host, parsed.tags) catch |err| return sendMonitorError(req, err);
     } else if (method == .POST and verb != null and std.mem.eql(u8, verb.?, "tags")) {
         const Tags = struct { tags: []const []const u8 };
         const body = try readBody(req, arena);

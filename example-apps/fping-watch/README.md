@@ -14,7 +14,10 @@ handful of targets once a minute and serves a web page with the last 24 hours.
   percentile, jitter, best/worst latency, loss and uptime;
 - **edit in place**: the ✎ next to a target's name renames it or moves it to
   another host (the history stays; the status starts over), the one next to
-  its tags opens a tag picker like GitHub's label picker;
+  its tags opens a tag picker like GitHub's label picker, which the add form
+  uses too. Both editors work alike: Enter or a click outside saves what
+  changed, Esc drops it. An IP address ticks the `ipv4` or `ipv6` tag of a
+  new target, and moving a target between the two swaps it;
 - **tags** on targets (a site, a customer, a service): click tags to show only the targets that have all of
   them, **find** by name, host or tag, and **order** the list by name, by the
   packet loss, jitter, average or worst latency of the last hour or 24 hours,
@@ -119,7 +122,7 @@ not the expected one is shown as "no data".
 | `GET /api/state` | everything the page shows: per target status, flags, tags and the 24 h series `rtt` (ms, median), `jitter` (ms, `null` with fewer than two replies) and `loss` (%), one entry per cycle, oldest first, `null` = no data; carries an ETag, `If-None-Match` gets `304` until the state changes |
 | `POST /api/targets` | add: `{"name": "...", "host": "...", "tags": ["..."]}` (`tags` optional) |
 | `POST /api/targets/ID/tags` | replace the tags: `{"tags": ["dns", "ipv6"]}`; at most 8, each 1-32 characters without spaces or commas, stored lowercase without duplicates |
-| `PATCH /api/targets/ID` | rename and/or move: `{"name": "...", "host": "..."}` (either may be left out); a new host keeps the history, the status starts over as PENDING and an acknowledgement is dropped |
+| `PATCH /api/targets/ID` | rename, move and/or retag: `{"name": "...", "host": "...", "tags": [...]}` (any may be left out; all or nothing); a new host keeps the history, the status starts over as PENDING and an acknowledgement is dropped |
 | `DELETE /api/targets/ID` | remove |
 | `POST /api/targets/ID/pause`, `/resume` | stop and resume probing |
 | `POST /api/targets/ID/ack`, `/unack` | acknowledge a DOWN target, or withdraw the acknowledgement |

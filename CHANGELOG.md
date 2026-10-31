@@ -20,9 +20,10 @@
   public IPv4 and IPv6 targets, the DOWN one in 203.0.113.0/24 (RFC 5737).
   `/healthz` reports `demo`.
 - **Tags** per target (at most 8; lowercase, no spaces or commas), set when
-  adding a target or with a picker like GitHub's label picker next to the
-  tags in the row (every tag in use with a tick, a filter that also creates
-  a new tag; saved when it closes); saved in `targets.json`
+  adding a target or later, with a picker like GitHub's label picker (in
+  the add form, and next to the tags in the row): every tag in use with a
+  tick, a filter that also creates a new tag. An IP address ticks `ipv4` or
+  `ipv6` for a new target (untick it to keep it off); saved in `targets.json`
   (`"tags": [...]`, optional, files from 1.0.0 load unchanged), served in
   `/api/state`, changed with `POST /api/targets/ID/tags`. The demo targets
   carry tags.
@@ -39,10 +40,14 @@
   keep counting every target; a filtered list says "N of M shown".
 - **Rename a target or move it to another host** in place: the ✎ next to
   its name (shown on hover where there is a mouse, always on touch screens)
-  opens a name and host editor; `PATCH /api/targets/ID`. A new host keeps
-  the history; the status starts over as PENDING and an acknowledgement is
-  dropped, and a cycle that probed the old host is not recorded for the new
-  one. The row head is no longer one button (it holds the edit buttons now):
+  opens a name and host editor; `PATCH /api/targets/ID` (name, host and/or
+  tags, all or nothing). A new host keeps the history; the status starts
+  over as PENDING and an acknowledgement is dropped, a cycle that probed the
+  old host is not recorded for the new one, and moving between an IPv4 and
+  an IPv6 address swaps the `ipv4`/`ipv6` tag. Both editors work alike:
+  Enter or a click outside saves what changed (nothing changed: it just
+  closes), Esc drops the changes; a name or host the server refuses keeps
+  the editor open with the reason. The row head is no longer one button (it holds the edit buttons now):
   a click anywhere still expands it, and a full-size button underneath
   serves the keyboard.
 - **Fix: the page no longer jumps to the top while scrolling on a phone.**
