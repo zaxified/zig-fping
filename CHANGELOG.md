@@ -58,8 +58,8 @@
   a click anywhere still expands it, and a full-size button underneath
   serves the keyboard.
 - The tag picker draws above an open detail (its chart showed through), and
-  on a narrow screen opens as a sheet at the bottom instead of running off
-  the right edge.
+  on a narrow screen moves left just enough to stay on it, still hanging
+  under the tags it edits.
 - **Fix: the page no longer jumps to the top while scrolling on a phone.**
   A mobile browser resizes the viewport height whenever its toolbar slides
   in or out; every resize re-rendered the list, which collapsed the page for

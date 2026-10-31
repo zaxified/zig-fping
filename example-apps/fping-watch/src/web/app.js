@@ -221,6 +221,7 @@ function render() {
   }
   for (const show of expand) show();
   renderAddTags();
+  placePicker();
   if (refocus) focusRow(refocus.id, refocus.key, refocus.caret);
   if (window.scrollY !== y) window.scrollTo(0, y);
 }
@@ -627,7 +628,23 @@ const toggleTagPicker = (owner) =>
 // The add form's tag line, outside the list.
 const newOwner = () => ({ id: "new", name: "the new target", tags: adding.tags });
 const renderAddTags = () => renderTagLine($("#add-tags .tagline"), newOwner());
-const redraw = () => (state ? render() : renderAddTags());
+const redraw = () => {
+  if (state) return render();
+  renderAddTags();
+  placePicker();
+};
+
+// The picker hangs under the tags it edits; on a narrow screen, where the
+// tags start far from the left, it moves left just enough to stay on it.
+function placePicker() {
+  const pop = $(".tag-popover");
+  if (!pop) return;
+  pop.style.left = "";
+  const margin = 12;
+  const r = pop.getBoundingClientRect();
+  const over = r.right - (document.documentElement.clientWidth - margin);
+  if (over > 0) pop.style.left = `${-Math.min(over, r.left - margin)}px`;
+}
 
 function openTagPicker(owner) {
   if (renaming) closeRename(true, false);

@@ -204,7 +204,7 @@ button, input { font: inherit; }
 .target:has(.tag-popover) { overflow: visible; position: relative; z-index: 2; }
 .tag-popover {
   /* Above the open detail, whose chart is positioned and comes later. */
-  position: absolute; z-index: 10; top: calc(100% + 6px); left: 0; width: min(300px, calc(100vw - 32px)); cursor: default;
+  position: absolute; z-index: 10; top: calc(100% + 6px); left: 0; width: min(300px, calc(100vw - 24px)); cursor: default;
   background: var(--card); border: 1px solid var(--line); border-radius: 10px;
   box-shadow: 0 8px 24px rgb(0 0 0 / 0.18); overflow: hidden;
 }
@@ -237,10 +237,5 @@ footer a { color: inherit; }
 
 @media (max-width: 720px) {
   .head { grid-template-columns: auto 1fr auto; gap: 10px 12px; padding: 12px 14px; }
-  /* No room to hang the picker under the tags: a sheet at the bottom. */
-  .tag-popover, .add-tags .tag-popover {
-    position: fixed; left: 12px; right: 12px; bottom: 12px; top: auto; width: auto;
-    box-shadow: 0 -4px 32px rgb(0 0 0 / 0.25);
-  }
   .beats { grid-column: 1 / -1; grid-row: 2; justify-content: flex-start; }
 }
