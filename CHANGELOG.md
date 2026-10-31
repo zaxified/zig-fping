@@ -20,16 +20,21 @@
   public IPv4 and IPv6 targets, the DOWN one in 203.0.113.0/24 (RFC 5737).
   `/healthz` reports `demo`.
 - **Tags** per target (at most 8; lowercase, no spaces or commas), set when
-  adding a target or with "Edit tags" in its detail; saved in `targets.json`
+  adding a target or in its detail with a picker like GitHub's label picker
+  (every tag in use with a tick, a filter that also creates a new tag; saved
+  when it closes); saved in `targets.json`
   (`"tags": [...]`, optional, files from 1.0.0 load unchanged), served in
   `/api/state`, changed with `POST /api/targets/ID/tags`. The demo targets
   carry tags.
 - **Filter, find and order** above the list: tag chips (a target must have
   every selected tag), a search over name, host and tags (every word must
-  match), and an order: problems first (default), name, or the 24-hour packet
-  loss, jitter, average or worst latency, with a button to reverse it;
-  targets without data stay last. The view is kept in the URL fragment
-  (`#open=3&tags=dns,ipv6&q=google&sort=loss&rev=1`, the old `#3,5` still
+  match), and an order: name, the packet loss, jitter, average or worst
+  latency of the last hour or the last 24 hours, or problems first (default:
+  DOWN, LOSS now, a problem in the last hour, one in the last 24 hours, ACK,
+  the rest; a problem is a lost probe or a cycle with 10 ms of jitter or
+  more; within a tier more loss, then more jitter), with a button to reverse
+  it; targets without data stay last. The view is kept in the URL fragment
+  (`#open=3&tags=dns,ipv6&q=google&sort=loss1h&rev=1`, the old `#3,5` still
   works) and follows a changed fragment without a reload. The summary pills
   keep counting every target; a filtered list says "N of M shown".
 - **Fix: the page no longer jumps to the top while scrolling on a phone.**

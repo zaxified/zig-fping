@@ -59,14 +59,14 @@ header {
 .pill::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--c); }
 
 .toolbar { display: flex; flex-wrap: wrap; gap: 8px 10px; align-items: center; margin-bottom: 14px; }
-#find, #sort, #order, .tag-input {
+#find, #sort, #order, .tag-popover .tag-input {
   padding: 6px 10px; border-radius: 8px;
   border: 1px solid var(--line); background: var(--card); color: var(--text);
 }
 #find { flex: 1 1 220px; }
 .order { display: inline-flex; gap: 4px; }
 #order { cursor: pointer; min-width: 36px; }
-:is(#find, #sort, #order, .tag-input):hover { border-color: var(--accent); }
+:is(#find, #sort, #order):hover { border-color: var(--accent); }
 .tagbar { display: flex; flex-wrap: wrap; gap: 6px; flex-basis: 100%; }
 .tagbar[hidden] { display: none; }
 .chip {
@@ -143,7 +143,39 @@ button, input { font: inherit; }
 .actions button:hover, .add button:hover { border-color: var(--accent); }
 .actions .danger { color: var(--down); }
 .note { color: var(--muted); font-size: 13px; align-self: center; }
-.tag-input { flex: 1 1 220px; }
+
+/* Tag picker, after GitHub's label picker. */
+.tagrow { position: relative; margin-top: 14px; max-width: 420px; }
+.target:has(.tag-popover) { overflow: visible; position: relative; z-index: 2; }
+.tag-trigger {
+  all: unset; box-sizing: border-box; cursor: pointer; display: block; width: 100%;
+  padding: 6px 8px; margin-left: -8px; border-radius: 8px;
+}
+.tag-trigger:hover .tag-head, .tag-trigger[aria-expanded="true"] .tag-head { color: var(--accent); }
+.tag-trigger:focus-visible { outline: 2px solid var(--accent); }
+.tag-head { display: flex; justify-content: space-between; font-size: 12px; font-weight: 600; color: var(--muted); }
+.tag-chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+.tag-chips .rtag { font-size: 12px; line-height: 20px; padding: 0 8px; }
+.tag-chips .none { font-size: 13px; color: var(--muted); }
+.tag-popover {
+  position: absolute; top: 28px; left: -8px; width: min(300px, calc(100vw - 32px));
+  background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.18); overflow: hidden;
+}
+.pop-title { font-size: 12px; font-weight: 600; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+.tag-popover .tag-input { display: block; width: calc(100% - 16px); margin: 8px; }
+.pop-list { list-style: none; margin: 0; padding: 0; max-height: 240px; overflow-y: auto; border-top: 1px solid var(--line); }
+.pop-item {
+  all: unset; box-sizing: border-box; cursor: pointer; display: flex; gap: 8px; align-items: center;
+  width: 100%; padding: 7px 10px; font-size: 14px; border-bottom: 1px solid var(--line);
+}
+.pop-item:hover, .pop-item:focus-visible { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.pop-item:disabled { cursor: default; opacity: 0.45; background: none; }
+.pop-item .check { width: 14px; color: var(--accent); font-weight: 700; text-align: center; }
+.pop-item.create { color: var(--accent); }
+.pop-empty { padding: 8px 10px; font-size: 13px; color: var(--muted); }
+.pop-note { font-size: 12px; color: var(--muted); padding: 6px 10px; }
+.pop-note:empty { display: none; }
 .add { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 18px; }
 .add input {
   flex: 1 1 180px; padding: 7px 10px; border-radius: 8px;

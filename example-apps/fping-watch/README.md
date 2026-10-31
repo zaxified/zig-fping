@@ -12,12 +12,13 @@ handful of targets once a minute and serves a web page with the last 24 hours.
 - click a row for the 24-hour latency chart (median per cycle, a band of ± the
   cycle's jitter) with packet loss underneath, and the 24-hour average, 95th
   percentile, jitter, best/worst latency, loss and uptime;
-- **tags** on targets (a site, a customer, a service): click tags to show
-  only the targets that have all of them, **find** by name, host or tag, and
-  **order** the list by status (problems first), name, or the 24-hour packet
-  loss, jitter, average or worst latency, either way round. The view lives in
-  the URL fragment (`#tags=dns,ipv6&q=google&sort=loss`), so a filtered view
-  can be bookmarked or sent; the summary at the top still counts every target;
+- **tags** on targets (a site, a customer, a service), picked from a list
+  like GitHub's labels: click tags to show only the targets that have all of
+  them, **find** by name, host or tag, and **order** the list by name, by the
+  packet loss, jitter, average or worst latency of the last hour or 24 hours,
+  or problems first (below), either way round. The view lives in the URL
+  fragment (`#tags=dns,ipv6&q=google&sort=loss1h`), so a filtered view can be
+  bookmarked or sent; the summary at the top still counts every target;
 - add, remove and **pause** targets; **acknowledge** a DOWN target the way
   Nagios does: it shows ACK instead of DOWN until 5 cycles in a row are not DOWN
   again, so the next outage is reported;
@@ -78,6 +79,21 @@ or history.
   { "name": "Wikipedia", "host": "wikipedia.org" }
 ] }
 ```
+
+### Problems first
+
+The default order, the most urgent on top:
+
+1. DOWN (not acknowledged);
+2. LOSS: the last cycle lost some probes;
+3. a problem in the last hour: a lost probe, or a cycle with 10 ms of jitter
+   or more;
+4. such a problem in the last 24 hours;
+5. ACK: an acknowledged outage, known and so below the unknown ones;
+6. the rest, then PENDING, then PAUSED.
+
+Within a tier, more packet loss and then more jitter go first, the last hour
+before the last 24 hours.
 
 ## How a cycle works
 

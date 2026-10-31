@@ -9,14 +9,12 @@ let state = null;
 // What the list shows, kept in the URL fragment so a filtered view can be
 // bookmarked or sent: #open=3,5&tags=dns,ipv6&q=google&sort=loss&rev=1.
 // The 1.0 form, #3,5, still opens targets 3 and 5.
-const SORTS = {
-  status: "Problems first",
-  name: "Name",
-  loss: "Packet loss (24 h)",
-  jitter: "Jitter (24 h)",
-  avg: "Average latency (24 h)",
-  max: "Worst latency (24 h)",
-};
+// Sort keys: status, name, and a metric over a window (loss1h, max24h, ...).
+const METRICS = { loss: "Packet loss", jitter: "Jitter", avg: "Average latency", max: "Worst latency" };
+const WINDOWS = { "1h": ["Last hour", "1 h", "hour"], "24h": ["Last 24 hours", "24 h", "day"] };
+const SORTS = { status: "Problems first", name: "Name" };
+for (const [w, [, short]] of Object.entries(WINDOWS))
+  for (const [m, label] of Object.entries(METRICS)) SORTS[m + w] = `${label} (${short})`;
 function parseView() {
   const hash = location.hash.slice(1);
   const p = new URLSearchParams(/^[\d,]+$/.test(hash) ? `open=${hash}` : hash);
@@ -42,9 +40,12 @@ function saveView() {
   history.replaceState(null, "", hash ? `#${hash}` : location.pathname + location.search);
 }
 
-// The tag editor of one target, kept across re-renders (a new cycle redraws
-// the list while someone types).
-let editing = null; // { id, value }
+// The open tag picker, kept across re-renders (a new cycle redraws the list
+// while someone picks): target id, the tags ticked so far, the list order
+// fixed when it opened, the filter text. tagNote: why the last change failed.
+let editing = null; // { id, selected: Set, order: [], filter }
+let tagNote = null; // { id, text }
+const MAX_TAGS = 8, MAX_TAG_LEN = 32;
 
 const splitTags = (text) => text.split(/[\s,]+/).filter(Boolean);
 
@@ -93,10 +94,12 @@ const describe = (t, i, at) =>
     : `${time(at)} · ${ms(t.rtt[i])}` + (t.jitter[i] === null ? "" : ` ± ${ms(t.jitter[i])}`) + ` · ${t.loss[i]} % loss`);
 const time = (unix) => new Date(unix * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
-function summarize(t) {
-  const rtts = t.rtt.filter((v) => v !== null);
-  const losses = t.loss.filter((v) => v !== null);
-  const jitters = t.jitter.filter((v) => v !== null);
+// Figures over the last `cycles` cycles (default: all 24 hours).
+function summarize(t, cycles = t.rtt.length) {
+  const from = Math.max(0, t.rtt.length - cycles);
+  const rtts = t.rtt.slice(from).filter((v) => v !== null);
+  const losses = t.loss.slice(from).filter((v) => v !== null);
+  const jitters = t.jitter.slice(from).filter((v) => v !== null);
   const up = losses.filter((v) => v < 100).length;
   let last = null, lastJitter = null;
   for (let i = t.rtt.length - 1; i >= 0; i--) {
@@ -113,6 +116,7 @@ function summarize(t) {
     max: rtts.length ? Math.max(...rtts) : null,
     p95: percentile(rtts, 95),
     jitter: mean(jitters),
+    jitterMax: jitters.length ? Math.max(...jitters) : null,
     loss: mean(losses),
     last,
     lastJitter,
@@ -176,13 +180,18 @@ function render() {
     summary.append(pill);
   }
 
-  const stats = new Map(state.targets.map((t) => [t.id, summarize(t)]));
+  const hour = 3600 / state.cycle_s;
+  const stats = new Map(state.targets.map((t) => [t.id, { day: summarize(t), hour: summarize(t, hour) }]));
   const shown = sortTargets(state.targets.filter(matches), stats);
   renderToolbar(shown.length);
 
-  // A re-render while the tag editor has the focus gives it back.
+  // A re-render gives the focus back to the tag picker's filter (with the
+  // caret) or its gear, whichever had it.
   const active = document.activeElement;
-  const refocus = active && active.classList.contains("tag-input") ? [active.selectionStart, active.selectionEnd] : null;
+  const refocus = active && active.closest("[data-target]") &&
+    (active.classList.contains("tag-input") ? [".tag-input", active.selectionStart, active.selectionEnd]
+      : active.classList.contains("tag-trigger") ? [".tag-trigger"] : null);
+  const focusedTarget = refocus && active.closest("[data-target]").dataset.target;
 
   // Swapping the list collapses the page for a moment, and the browser clamps
   // the scroll position to the shorter page: a reader scrolled down would land
@@ -191,7 +200,7 @@ function render() {
   const y = window.scrollY;
   const list = $("#targets");
   const expand = [];
-  list.replaceChildren(...shown.map((t) => renderTarget(t, stats.get(t.id), expand)));
+  list.replaceChildren(...shown.map((t) => renderTarget(t, stats.get(t.id).day, expand)));
   if (state.targets.length === 0) list.append(el("p", "empty", "No targets yet."));
   else if (shown.length === 0) {
     const p = el("p", "empty", "No target matches the filter. ");
@@ -203,10 +212,11 @@ function render() {
   }
   for (const show of expand) show();
   if (refocus) {
-    const input = $(".tag-input", list);
-    if (input) {
-      input.focus({ preventScroll: true });
-      input.setSelectionRange(...refocus);
+    const [sel, ...caret] = refocus;
+    const again = $(`[data-target="${focusedTarget}"] ${sel}`, list);
+    if (again) {
+      again.focus({ preventScroll: true });
+      if (caret.length) again.setSelectionRange(...caret);
     }
   }
   if (window.scrollY !== y) window.scrollTo(0, y);
@@ -224,8 +234,27 @@ function matches(t) {
   return splitTags(view.q.toLowerCase()).every((w) => hay.some((h) => h.includes(w)));
 }
 
-// Problems first: DOWN, LOSS, ACK, PENDING, UP, PAUSED.
-const RANK = { down: 0, degraded: 1, acked: 2, pending: 3, up: 4, paused: 5 };
+// A window had a problem when a probe was lost or a cycle's jitter reached
+// this (milliseconds).
+const JITTER_WARN_MS = 10;
+const troubled = (s) => s.loss > 0 || s.jitterMax >= JITTER_WARN_MS;
+
+// Problems first, the most urgent on top: DOWN, LOSS now, a problem in the
+// last hour, one in the last 24 hours, an acknowledged outage (known, so
+// below the unknown ones), then the rest.
+function problemTier(t, st) {
+  switch (statusOf(t)) {
+    case "down": return 0;
+    case "degraded": return 1;
+    case "acked": return 4;
+    case "pending": return 6;
+    case "paused": return 7;
+  }
+  return troubled(st.hour) ? 2 : troubled(st.day) ? 3 : 5;
+}
+// Within a tier: more loss, then more jitter; the last hour weighs first.
+const severity = (st) => [st.hour.loss, st.hour.jitter, st.day.loss, st.day.jitter].map((v) => v ?? 0);
+
 const byName = (a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" });
 
 // Each order has a natural direction (problems first, A to Z, the worst
@@ -233,20 +262,25 @@ const byName = (a, b) => a.name.localeCompare(b.name, undefined, { numeric: true
 // way, and ties keep name order.
 function sortTargets(list, stats) {
   const dir = view.rev ? -1 : 1;
-  const metric = { loss: "loss", jitter: "jitter", avg: "avg", max: "max" }[view.sort];
-  const cmp = {
-    status: (a, b) => RANK[statusOf(a)] - RANK[statusOf(b)],
-    name: () => 0,
-  }[view.sort];
-  return list.sort((a, b) => {
-    let d = 0;
-    if (metric) {
-      const x = stats.get(a.id)[metric], y = stats.get(b.id)[metric];
-      if (x === null || y === null) d = (x === null) - (y === null);
-      else d = dir * (y - x);
-    } else d = dir * cmp(a, b);
-    return d || (view.sort === "name" ? dir : 1) * byName(a, b);
-  });
+  const m = /^(loss|jitter|avg|max)(1h|24h)$/.exec(view.sort);
+  const cmp = (a, b) => {
+    const sa = stats.get(a.id), sb = stats.get(b.id);
+    if (m) {
+      const win = WINDOWS[m[2]][2];
+      const x = sa[win][m[1]], y = sb[win][m[1]];
+      // Times dir, so the reversal below cancels out: no data stays last.
+      if (x === null || y === null) return ((x === null) - (y === null)) * dir;
+      return y - x;
+    }
+    if (view.sort === "status") {
+      const d = problemTier(a, sa) - problemTier(b, sb);
+      if (d) return d;
+      const va = severity(sa), vb = severity(sb);
+      for (let i = 0; i < va.length; i++) if (va[i] !== vb[i]) return vb[i] - va[i];
+    }
+    return 0;
+  };
+  return list.sort((a, b) => dir * cmp(a, b) || (view.sort === "name" ? dir : 1) * byName(a, b));
 }
 
 function setView(change) {
@@ -304,6 +338,7 @@ function renderToolbar(count) {
 // them once the row is in the page.
 function renderTarget(t, s, expand) {
   const node = $("#row").content.firstElementChild.cloneNode(true);
+  node.dataset.target = t.id;
   const [label, color] = STATUS[statusOf(t)];
 
   const badge = $(".badge", node);
@@ -370,10 +405,11 @@ function renderDetail(detail, t, s) {
   if (t.acked) stat("acknowledged", `clears after ${state.ack_clear_after - t.ok_streak} more good cycles`);
   if (t.error) stat("last error", t.error);
 
+  renderTagRow($(".tagrow", detail), t);
+
   const actions = $(".actions", detail);
   actions.replaceChildren();
   const note = el("span", "note");
-  if (editing && editing.id === t.id) return renderTagEditor(actions, note, t);
   const action = (text, hint, fn, cls) => {
     const b = el("button", cls, text);
     b.type = "button";
@@ -396,50 +432,162 @@ function renderDetail(detail, t, s) {
   if (t.status === "down" && !t.acked)
     action("Acknowledge", `Mark this outage as known: the target shows ACK instead of DOWN until ${state.ack_clear_after} cycles in a row are not DOWN`, () => call("POST", `${base}/ack`));
   if (t.acked) action("Remove acknowledgement", "Show this target as DOWN again", () => call("POST", `${base}/unack`));
-  action("Edit tags", "Labels to filter the list by, e.g. a site, a customer or a service", () => {
-    editing = { id: t.id, value: t.tags.join(" ") };
-    renderDetail(detail, t, s);
-    $(".tag-input", detail).focus();
-  });
   action("Remove", "Stop monitoring this target and delete its history",
     () => (state.read_only || confirm(`Remove ${t.name}?`)) && call("DELETE", base).then(() => view.open.delete(t.id)), "danger");
   actions.append(note);
 }
 
-// The tag editor in place of the actions; `editing` keeps the typed value
-// across re-renders.
-function renderTagEditor(actions, note, t) {
-  const input = el("input", "tag-input");
-  input.value = editing.value;
-  input.placeholder = "Tags, separated by spaces";
-  input.setAttribute("aria-label", `Tags of ${t.name}`);
-  input.maxLength = 300;
-  input.addEventListener("input", () => (editing.value = input.value));
-  const close = () => {
-    editing = null;
-    render();
-  };
-  const save = async () => {
-    note.textContent = "";
-    try {
-      await call("POST", `api/targets/${t.id}/tags`, { tags: splitTags(input.value) });
-      close();
-    } catch (err) {
-      note.textContent = err.message;
-    }
-  };
-  input.addEventListener("keydown", (ev) => {
-    if (ev.key === "Enter") save();
-    if (ev.key === "Escape") close();
-  });
-  const button = (text, fn) => {
-    const b = el("button", null, text);
-    b.type = "button";
-    b.addEventListener("click", fn);
-    return b;
-  };
-  actions.append(input, button("Save", save), button("Cancel", close), note);
+// ----- tag picker ------------------------------------------------------------------
+//
+// Like GitHub's label picker: the tags, and a gear; a click opens a list of
+// every tag in use with a tick per tag of this target, a filter that also
+// creates a new tag, and the change is saved when the list closes (Escape,
+// a click outside, or the gear again).
+
+function renderTagRow(box, t) {
+  box.replaceChildren();
+  const isOpen = editing !== null && editing.id === t.id;
+  const trigger = el("button", "tag-trigger");
+  trigger.type = "button";
+  trigger.title = "Edit the tags: labels to filter the list by, e.g. a site, a customer or a service";
+  trigger.setAttribute("aria-expanded", String(isOpen));
+  const head = el("span", "tag-head", "Tags");
+  head.append(el("span", "gear", "⚙"));
+  const chips = el("span", "tag-chips");
+  for (const tag of t.tags) chips.append(el("span", "rtag", tag));
+  if (t.tags.length === 0) chips.append(el("span", "none", "None yet"));
+  trigger.append(head, chips);
+  trigger.addEventListener("click", () => (isOpen ? closeTagPicker() : openTagPicker(t)));
+  box.append(trigger);
+  if (tagNote && tagNote.id === t.id) box.append(el("div", "note", tagNote.text));
+  if (isOpen) box.append(renderTagPicker(t));
 }
+
+function openTagPicker(t) {
+  if (editing) closeTagPicker();
+  const others = [...new Set(state.targets.flatMap((x) => x.tags))].filter((tag) => !t.tags.includes(tag));
+  const byTag = (a, b) => a.localeCompare(b, undefined, { numeric: true });
+  editing = { id: t.id, selected: new Set(t.tags), order: [...[...t.tags].sort(byTag), ...others.sort(byTag)], filter: "" };
+  tagNote = null;
+  render();
+  const input = $(".tag-popover .tag-input");
+  if (input) input.focus({ preventScroll: true });
+}
+
+async function closeTagPicker() {
+  const e = editing;
+  if (!e) return;
+  editing = null;
+  const t = state.targets.find((x) => x.id === e.id);
+  const tags = [...e.selected];
+  const changed = t && (tags.length !== t.tags.length || tags.some((tag) => !t.tags.includes(tag)));
+  render();
+  if (!changed) return;
+  try {
+    await call("POST", `api/targets/${e.id}/tags`, { tags });
+  } catch (err) {
+    tagNote = { id: e.id, text: err.message };
+    render();
+  }
+}
+
+// Why `text` cannot be a tag, or null.
+const tagProblem = (text) =>
+  text.length > MAX_TAG_LEN ? `At most ${MAX_TAG_LEN} characters` : /[\s,]/.test(text) ? "No spaces or commas" : null;
+
+function renderTagPicker(t) {
+  const pop = el("div", "tag-popover");
+  pop.setAttribute("role", "dialog");
+  pop.setAttribute("aria-label", `Tags of ${t.name}`);
+  const title = el("div", "pop-title", "Apply tags to this target");
+  const input = el("input", "tag-input");
+  input.placeholder = "Filter or create a tag";
+  input.setAttribute("aria-label", "Filter or create a tag");
+  input.maxLength = 64;
+  input.value = editing.filter;
+  const list = el("ul", "pop-list");
+  list.setAttribute("role", "listbox");
+  list.setAttribute("aria-multiselectable", "true");
+  const note = el("div", "pop-note");
+
+  const toggle = (tag) => {
+    if (editing.selected.has(tag)) editing.selected.delete(tag);
+    else if (editing.selected.size < MAX_TAGS) editing.selected.add(tag);
+    const keep = document.activeElement && document.activeElement.dataset.tag === tag;
+    fill();
+    if (keep) $(`.pop-item[data-tag="${CSS.escape(tag)}"]`, list)?.focus();
+  };
+  const create = (tag) => {
+    if (editing.selected.size >= MAX_TAGS) return;
+    editing.order.unshift(tag);
+    editing.selected.add(tag);
+    editing.filter = input.value = "";
+    fill();
+  };
+  // What Enter does: the exact match, the only match, or a new tag.
+  let enter = null;
+  const fill = () => {
+    const q = editing.filter.trim().toLowerCase();
+    const full = editing.selected.size >= MAX_TAGS;
+    list.replaceChildren();
+    const shown = editing.order.filter((tag) => tag.includes(q));
+    for (const tag of shown) {
+      const on = editing.selected.has(tag);
+      const b = el("button", "pop-item");
+      b.type = "button";
+      b.setAttribute("role", "option");
+      b.setAttribute("aria-selected", String(on));
+      b.disabled = !on && full;
+      b.dataset.tag = tag;
+      b.append(el("span", "check", on ? "✓" : ""), el("span", null, tag));
+      b.addEventListener("click", () => toggle(tag));
+      const li = el("li");
+      li.append(b);
+      list.append(li);
+    }
+    const problem = q ? tagProblem(q) : null;
+    const canCreate = q !== "" && !problem && !editing.order.includes(q);
+    if (canCreate) {
+      const b = el("button", "pop-item create");
+      b.type = "button";
+      b.disabled = full;
+      b.append(el("span", "check", "+"), el("span", null, `Create tag “${q}”`));
+      b.addEventListener("click", () => create(q));
+      const li = el("li");
+      li.append(b);
+      list.append(li);
+    }
+    if (!shown.length && !canCreate && !problem) list.append(el("li", "pop-empty", "No tags yet: type one"));
+    enter = editing.order.includes(q) ? () => toggle(q) : canCreate ? () => create(q) : shown.length === 1 ? () => toggle(shown[0]) : null;
+    note.textContent = problem || (full ? `At most ${MAX_TAGS} tags per target` : "");
+  };
+  input.addEventListener("input", () => {
+    editing.filter = input.value;
+    fill();
+  });
+  input.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter" && enter) {
+      ev.preventDefault();
+      enter();
+      editing.filter = input.value = "";
+      fill();
+    }
+  });
+  pop.addEventListener("keydown", (ev) => {
+    if (ev.key === "Escape") {
+      closeTagPicker();
+      document.querySelector(`[data-target="${t.id}"] .tag-trigger`)?.focus({ preventScroll: true });
+    }
+  });
+  fill();
+  pop.append(title, input, list, note);
+  return pop;
+}
+
+// A click anywhere but the picker or its gear closes it, and saves.
+document.addEventListener("pointerdown", (ev) => {
+  if (editing && !ev.target.closest(".tag-popover, .tag-trigger")) closeTagPicker();
+});
 
 function renderChart(box, t) {
   const W = Math.max(300, box.clientWidth || 600);
@@ -557,7 +705,13 @@ const syncControls = () => {
   sort.value = view.sort;
 };
 find.addEventListener("input", () => setView(() => (view.q = find.value.trim())));
-for (const [key, label] of Object.entries(SORTS)) sort.append(new Option(label, key));
+sort.append(new Option(SORTS.status, "status"), new Option(SORTS.name, "name"));
+for (const [w, [group]] of Object.entries(WINDOWS)) {
+  const g = el("optgroup");
+  g.label = group;
+  for (const m of Object.keys(METRICS)) g.append(new Option(SORTS[m + w], m + w));
+  sort.append(g);
+}
 syncControls();
 sort.addEventListener("change", () => setView(() => (view.sort = sort.value)));
 $("#order").addEventListener("click", () => setView(() => (view.rev = !view.rev)));
