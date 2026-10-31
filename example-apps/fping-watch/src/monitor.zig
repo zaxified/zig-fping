@@ -208,6 +208,40 @@ pub const Monitor = struct {
         m.saveConfigLocked();
     }
 
+    /// Renames the target and/or moves it to another host (null: keep). A new
+    /// host keeps the history but not the current status: the target is
+    /// PENDING until the next cycle, and an acknowledgement is dropped (it was
+    /// for the old host).
+    pub fn edit(m: *Monitor, id: u32, name: ?[]const u8, host: ?[]const u8) (Error || error{OutOfMemory})!void {
+        if (name) |n| try validateName(n);
+        if (host) |h| try validateHost(h);
+        const name_copy = if (name) |n| try m.gpa.dupe(u8, n) else null;
+        errdefer if (name_copy) |n| m.gpa.free(n);
+        const host_copy = if (host) |h| try m.gpa.dupe(u8, h) else null;
+        errdefer if (host_copy) |h| m.gpa.free(h);
+        m.mutex.lockUncancelable(m.io);
+        defer m.mutex.unlock(m.io);
+        const t = m.targets.items[m.find(id) orelse return error.UnknownTarget];
+        if (name_copy) |n| {
+            m.gpa.free(t.name);
+            t.name = n;
+        }
+        if (host_copy) |h| {
+            if (std.mem.eql(u8, h, t.host)) {
+                m.gpa.free(h);
+            } else {
+                m.gpa.free(t.host);
+                t.host = h;
+                t.last = .{};
+                t.last_error = null;
+                t.acked = false;
+                t.ok_streak = 0;
+            }
+        }
+        m.version += 1;
+        m.saveConfigLocked();
+    }
+
     pub const Action = enum { pause, resume_, ack, unack };
 
     pub fn apply(m: *Monitor, id: u32, action: Action) Error!void {
@@ -321,6 +355,7 @@ pub const Monitor = struct {
 
     fn recordLocked(m: *Monitor, target: *Target, t: i64, job: *Job) void {
         if (target.paused) return; // paused while this cycle ran
+        if (!std.mem.eql(u8, target.host, job.host)) return; // moved to another host meanwhile
         var sample: Sample = .{ .t = t, .sent = probes_per_cycle };
         if (job.err == null) {
             sample.sent = job.sent;
@@ -778,9 +813,10 @@ fn testMonitor() Monitor {
 fn fakeCycle(m: *Monitor, id: u32, t: i64, recv: u8) void {
     m.mutex.lockUncancelable(m.io);
     defer m.mutex.unlock(m.io);
-    var job: Job = .{ .id = id, .host = "", .sent = probes_per_cycle, .replies = recv };
+    const target = m.targets.items[m.find(id).?];
+    var job: Job = .{ .id = id, .host = target.host, .sent = probes_per_cycle, .replies = recv };
     for (0..recv) |i| job.rtts[i] = @intCast(1000 * (i + 1));
-    m.recordLocked(m.targets.items[m.find(id).?], t, &job);
+    m.recordLocked(target, t, &job);
 }
 
 test "status follows the last sample" {
@@ -1022,6 +1058,44 @@ test "tags: validated, normalized, saved, loaded and served" {
     var m3: Monitor = .{ .gpa = testing.allocator, .io = testing.io, .config_path = config };
     defer m3.deinit();
     try testing.expectError(error.InvalidTags, m3.loadConfig());
+}
+
+test "edit: rename, move to another host, refuse bad input" {
+    var m = testMonitor();
+    defer m.deinit();
+    const id = try m.add("a", "192.0.2.1", &.{});
+    const t = m.targets.items[0];
+    fakeCycle(&m, id, 60, 0);
+    try m.apply(id, .ack);
+
+    try testing.expectError(error.InvalidName, m.edit(id, "", null));
+    try testing.expectError(error.InvalidHost, m.edit(id, null, "not a host"));
+    try testing.expectError(error.UnknownTarget, m.edit(id + 1, "b", null));
+    try testing.expectEqualStrings("a", t.name);
+
+    // A new name keeps everything else.
+    try m.edit(id, "router", null);
+    try testing.expectEqualStrings("router", t.name);
+    try testing.expect(t.acked);
+    try testing.expectEqual(.down, t.status());
+    // The same host again changes nothing.
+    try m.edit(id, null, "192.0.2.1");
+    try testing.expect(t.acked);
+
+    // A new host: history kept, status and acknowledgement not.
+    try m.edit(id, null, "192.0.2.2");
+    try testing.expectEqualStrings("192.0.2.2", t.host);
+    try testing.expectEqual(.pending, t.status());
+    try testing.expect(!t.acked);
+    try testing.expectEqual(60, t.history[m.slot(60)].t);
+
+    // A cycle that probed the old host does not land on the new one.
+    m.mutex.lockUncancelable(m.io);
+    var job: Job = .{ .id = id, .host = "192.0.2.1", .sent = probes_per_cycle, .replies = 5 };
+    m.recordLocked(t, 120, &job);
+    m.mutex.unlock(m.io);
+    try testing.expectEqual(.pending, t.status());
+    try testing.expectEqual(0, t.history[m.slot(120)].t);
 }
 
 test "names and hosts are validated" {

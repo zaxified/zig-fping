@@ -45,6 +45,8 @@ function saveView() {
 // fixed when it opened, the filter text. tagNote: why the last change failed.
 let editing = null; // { id, selected: Set, order: [], filter }
 let tagNote = null; // { id, text }
+// The open name/host editor, kept across re-renders the same way.
+let renaming = null; // { id, name, host, note }
 const MAX_TAGS = 8, MAX_TAG_LEN = 32;
 
 const splitTags = (text) => text.split(/[\s,]+/).filter(Boolean);
@@ -185,13 +187,11 @@ function render() {
   const shown = sortTargets(state.targets.filter(matches), stats);
   renderToolbar(shown.length);
 
-  // A re-render gives the focus back to the tag picker's filter (with the
-  // caret) or its gear, whichever had it.
+  // A re-render gives the focus back to the control of a row that had it
+  // (an editor's field with its caret, an edit button), marked data-focus.
   const active = document.activeElement;
-  const refocus = active && active.closest("[data-target]") &&
-    (active.classList.contains("tag-input") ? [".tag-input", active.selectionStart, active.selectionEnd]
-      : active.classList.contains("tag-trigger") ? [".tag-trigger"] : null);
-  const focusedTarget = refocus && active.closest("[data-target]").dataset.target;
+  const row = active && active.dataset.focus && active.closest("[data-target]");
+  const refocus = row && { id: row.dataset.target, key: active.dataset.focus, caret: active.tagName === "INPUT" ? [active.selectionStart, active.selectionEnd] : null };
 
   // Swapping the list collapses the page for a moment, and the browser clamps
   // the scroll position to the shorter page: a reader scrolled down would land
@@ -211,15 +211,15 @@ function render() {
     list.append(p);
   }
   for (const show of expand) show();
-  if (refocus) {
-    const [sel, ...caret] = refocus;
-    const again = $(`[data-target="${focusedTarget}"] ${sel}`, list);
-    if (again) {
-      again.focus({ preventScroll: true });
-      if (caret.length) again.setSelectionRange(...caret);
-    }
-  }
+  if (refocus) focusRow(refocus.id, refocus.key, refocus.caret);
   if (window.scrollY !== y) window.scrollTo(0, y);
+}
+
+function focusRow(id, key, caret) {
+  const e = $(`#targets [data-target="${id}"] [data-focus="${key}"]`);
+  if (!e) return;
+  e.focus({ preventScroll: true });
+  if (caret) e.setSelectionRange(...caret);
 }
 
 // ----- filter and order ----------------------------------------------------------
@@ -344,22 +344,33 @@ function renderTarget(t, s, expand) {
   const badge = $(".badge", node);
   badge.textContent = label;
   badge.style.setProperty("--c", color);
-  $(".name", node).textContent = t.name;
-  $(".host", node).textContent = t.host;
-  const tags = $(".tags", node);
-  for (const tag of t.tags) tags.append(el("span", view.tags.has(tag) ? "rtag on" : "rtag", tag));
-  tags.hidden = t.tags.length === 0;
+  const head = $(".head", node);
+  const who = $(".who", node);
+  if (renaming && renaming.id === t.id) {
+    head.classList.add("editing");
+    who.replaceChildren(renderRenameEditor(t));
+  } else {
+    $(".name", node).textContent = t.name;
+    $(".host", node).textContent = t.host;
+    $(".edit-target", node).addEventListener("click", () => openRename(t));
+    renderTagLine($(".tagline", node), t);
+  }
   $(".uptime", node).textContent = s.uptime === null ? "–" : `${s.uptime.toFixed(s.uptime === 100 ? 0 : 2)} %`;
   $(".latency", node).textContent = t.paused ? "–" : ms(s.last);
   renderBeats($(".beats", node), t);
 
-  const head = $(".head", node);
+  const expandButton = $(".expand", node);
+  expandButton.setAttribute("aria-label", `${t.name}: chart, figures and actions`);
   const detail = $(".detail", node);
   const toggle = (show) => {
     detail.hidden = !show;
-    head.setAttribute("aria-expanded", String(show));
+    expandButton.setAttribute("aria-expanded", String(show));
     if (show) renderDetail(detail, t, s);
   };
+  // A click anywhere in the head expands the row, except on its editors.
+  // They stop the click themselves: by the time it would get here, they may
+  // have redrawn the row, and the clicked element is no longer in it.
+  for (const e of node.querySelectorAll(".edit-btn")) e.addEventListener("click", (ev) => ev.stopPropagation());
   head.addEventListener("click", () => {
     if (view.open.has(t.id)) view.open.delete(t.id);
     else view.open.add(t.id);
@@ -405,7 +416,6 @@ function renderDetail(detail, t, s) {
   if (t.acked) stat("acknowledged", `clears after ${state.ack_clear_after - t.ok_streak} more good cycles`);
   if (t.error) stat("last error", t.error);
 
-  renderTagRow($(".tagrow", detail), t);
 
   const actions = $(".actions", detail);
   actions.replaceChildren();
@@ -437,41 +447,102 @@ function renderDetail(detail, t, s) {
   actions.append(note);
 }
 
+// ----- name and host editor --------------------------------------------------------
+
+function openRename(t) {
+  if (editing) closeTagPicker();
+  renaming = { id: t.id, name: t.name, host: t.host, note: "" };
+  render();
+  focusRow(t.id, "rename-name", [0, t.name.length]);
+}
+
+function closeRename() {
+  const id = renaming && renaming.id;
+  renaming = null;
+  render();
+  if (id !== null) focusRow(id, "edit-target");
+}
+
+// In place of the name and host; a new host keeps the history but starts
+// over as PENDING (the server drops the status and any acknowledgement).
+function renderRenameEditor(t) {
+  const form = el("form", "who-editor");
+  form.addEventListener("click", (ev) => ev.stopPropagation());
+  form.setAttribute("aria-label", `Rename ${t.name}`);
+  const field = (key, value, placeholder, maxLength, title) => {
+    const input = el("input");
+    input.dataset.focus = `rename-${key}`;
+    input.value = value;
+    input.placeholder = placeholder;
+    input.maxLength = maxLength;
+    input.required = true;
+    input.title = title;
+    input.setAttribute("aria-label", placeholder);
+    input.addEventListener("input", () => (renaming[key] = input.value));
+    return input;
+  };
+  const name = field("name", renaming.name, "Name", 64, "Shown in the list");
+  const host = field("host", renaming.host, "IP address or host name", 253,
+    "A new host keeps the history; the status starts over and an acknowledgement is dropped");
+  const save = el("button", "primary", "Save");
+  save.type = "submit";
+  const cancel = el("button", null, "Cancel");
+  cancel.type = "button";
+  cancel.addEventListener("click", closeRename);
+  const note = el("span", "row-note", renaming.note);
+  form.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const change = {};
+    if (renaming.name.trim() !== t.name) change.name = renaming.name.trim();
+    if (renaming.host.trim() !== t.host) change.host = renaming.host.trim();
+    if (Object.keys(change).length === 0) return closeRename();
+    const id = renaming.id;
+    try {
+      await call("PATCH", `api/targets/${id}`, change);
+      closeRename();
+    } catch (err) {
+      if (renaming && renaming.id === id) renaming.note = err.message;
+      render();
+    }
+  });
+  form.addEventListener("keydown", (ev) => {
+    if (ev.key === "Escape") closeRename();
+  });
+  form.append(name, host, save, cancel, note);
+  return form;
+}
+
 // ----- tag picker ------------------------------------------------------------------
 //
-// Like GitHub's label picker: the tags, and a gear; a click opens a list of
-// every tag in use with a tick per tag of this target, a filter that also
+// Like GitHub's label picker: the edit button next to the tags opens a list
+// of every tag in use with a tick per tag of this target, a filter that also
 // creates a new tag, and the change is saved when the list closes (Escape,
-// a click outside, or the gear again).
+// a click outside, or the button again).
 
-function renderTagRow(box, t) {
-  box.replaceChildren();
+// The tags in the head, their edit button and, when open, the picker.
+function renderTagLine(line, t) {
+  const tags = $(".tags", line);
+  for (const tag of t.tags) tags.append(el("span", view.tags.has(tag) ? "rtag on" : "rtag", tag));
+  tags.hidden = t.tags.length === 0;
   const isOpen = editing !== null && editing.id === t.id;
-  const trigger = el("button", "tag-trigger");
-  trigger.type = "button";
-  trigger.title = "Edit the tags: labels to filter the list by, e.g. a site, a customer or a service";
-  trigger.setAttribute("aria-expanded", String(isOpen));
-  const head = el("span", "tag-head", "Tags");
-  head.append(el("span", "gear", "⚙"));
-  const chips = el("span", "tag-chips");
-  for (const tag of t.tags) chips.append(el("span", "rtag", tag));
-  if (t.tags.length === 0) chips.append(el("span", "none", "None yet"));
-  trigger.append(head, chips);
-  trigger.addEventListener("click", () => (isOpen ? closeTagPicker() : openTagPicker(t)));
-  box.append(trigger);
-  if (tagNote && tagNote.id === t.id) box.append(el("div", "note", tagNote.text));
-  if (isOpen) box.append(renderTagPicker(t));
+  const button = $(".edit-tags", line);
+  button.textContent = t.tags.length ? "✎" : "+ tags";
+  button.classList.toggle("empty", t.tags.length === 0);
+  button.setAttribute("aria-expanded", String(isOpen));
+  button.addEventListener("click", () => (isOpen ? closeTagPicker() : openTagPicker(t)));
+  if (tagNote && tagNote.id === t.id) line.after(el("span", "row-note", tagNote.text));
+  if (isOpen) line.append(renderTagPicker(t));
 }
 
 function openTagPicker(t) {
   if (editing) closeTagPicker();
+  renaming = null;
   const others = [...new Set(state.targets.flatMap((x) => x.tags))].filter((tag) => !t.tags.includes(tag));
   const byTag = (a, b) => a.localeCompare(b, undefined, { numeric: true });
   editing = { id: t.id, selected: new Set(t.tags), order: [...[...t.tags].sort(byTag), ...others.sort(byTag)], filter: "" };
   tagNote = null;
   render();
-  const input = $(".tag-popover .tag-input");
-  if (input) input.focus({ preventScroll: true });
+  focusRow(t.id, "tag-filter");
 }
 
 async function closeTagPicker() {
@@ -497,10 +568,12 @@ const tagProblem = (text) =>
 
 function renderTagPicker(t) {
   const pop = el("div", "tag-popover");
+  pop.addEventListener("click", (ev) => ev.stopPropagation());
   pop.setAttribute("role", "dialog");
   pop.setAttribute("aria-label", `Tags of ${t.name}`);
   const title = el("div", "pop-title", "Apply tags to this target");
   const input = el("input", "tag-input");
+  input.dataset.focus = "tag-filter";
   input.placeholder = "Filter or create a tag";
   input.setAttribute("aria-label", "Filter or create a tag");
   input.maxLength = 64;
@@ -576,7 +649,7 @@ function renderTagPicker(t) {
   pop.addEventListener("keydown", (ev) => {
     if (ev.key === "Escape") {
       closeTagPicker();
-      document.querySelector(`[data-target="${t.id}"] .tag-trigger`)?.focus({ preventScroll: true });
+      focusRow(t.id, "edit-tags");
     }
   });
   fill();
@@ -586,7 +659,7 @@ function renderTagPicker(t) {
 
 // A click anywhere but the picker or its gear closes it, and saves.
 document.addEventListener("pointerdown", (ev) => {
-  if (editing && !ev.target.closest(".tag-popover, .tag-trigger")) closeTagPicker();
+  if (editing && !ev.target.closest(".tag-popover, .edit-tags")) closeTagPicker();
 });
 
 function renderChart(box, t) {

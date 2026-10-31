@@ -107,6 +107,11 @@ status 400 POST /api/targets '{"name":"x","host":"127.0.0.4","tags":["two words"
 status 200 POST /api/targets/1/tags '{"tags":["loopback","v4"]}'
 status 400 POST /api/targets/1/tags '{"tags":["a,b"]}'
 status 404 POST /api/targets/99/tags '{"tags":["x"]}'
+status 200 PATCH /api/targets/1 '{"name":"lo4 renamed"}'
+status 400 PATCH /api/targets/1 '{"host":"no such host!"}'
+status 404 PATCH /api/targets/99 '{"name":"x"}'
+curl -sf "$URL/api/state" | grep -q '"name":"lo4 renamed","host":"127.0.0.1"' || fail "rename not served"
+grep -q '"name": "lo4 renamed"' targets.json || fail "rename not saved"
 curl -sf "$URL/api/state" | grep -q '"tags":\["loopback","v4"\]' || fail "tags not served"
 grep -q '"tags": \["lab","core"\]' targets.json || fail "tags not saved"
 # A form post (no JSON content type) is refused: the CSRF guard.

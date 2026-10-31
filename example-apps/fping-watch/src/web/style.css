@@ -84,26 +84,59 @@ header {
   background: var(--card); border: 1px solid var(--line); border-radius: 12px;
   overflow: hidden;
 }
+/* The head expands the row on a click anywhere; for the keyboard, a button
+   covers it, under the edit controls (later siblings, positioned). */
 .head {
-  all: unset; box-sizing: border-box; cursor: pointer; width: 100%;
+  position: relative; cursor: pointer;
   display: grid; grid-template-columns: auto minmax(120px, 220px) 1fr auto;
   align-items: center; gap: 16px; padding: 14px 18px;
 }
-.head:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: 12px; }
+.head > :not(.expand) { position: relative; }
+.expand { all: unset; position: absolute; inset: 0; border-radius: 12px; cursor: pointer; }
+.expand:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.head.editing { cursor: default; grid-template-columns: auto 1fr auto; }
+.head.editing .beats { display: none; }
 .badge {
   min-width: 64px; text-align: center; padding: 3px 10px; border-radius: 999px;
   font-size: 12px; font-weight: 600; color: #fff; background: var(--c);
 }
 .who { display: flex; flex-direction: column; min-width: 0; }
+.line { display: flex; align-items: center; gap: 4px; min-width: 0; }
 .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .host { color: var(--muted); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.tags { display: flex; gap: 4px; overflow: hidden; margin-top: 3px; }
+.tagline { margin-top: 3px; }
+.tags { display: flex; gap: 4px; overflow: hidden; }
 .tags[hidden] { display: none; }
 .rtag {
   font-size: 11px; line-height: 16px; padding: 0 6px; border-radius: 999px; white-space: nowrap;
   background: var(--bg); border: 1px solid var(--line); color: var(--muted);
 }
 .rtag.on { border-color: var(--accent); color: var(--accent); }
+
+/* Edit buttons: shown on hover or focus where there is a mouse, always
+   (faintly) on touch screens. */
+.edit-btn {
+  all: unset; cursor: pointer; flex: none; font-size: 12px; line-height: 16px;
+  padding: 1px 5px; border-radius: 6px; color: var(--muted); opacity: 0;
+}
+.head:hover .edit-btn, .head:focus-within .edit-btn, .edit-btn[aria-expanded="true"] { opacity: 1; }
+@media (hover: none) { .edit-btn { opacity: 0.7; } }
+.edit-btn:hover, .edit-btn[aria-expanded="true"] { color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.edit-btn:focus-visible { opacity: 1; outline: 2px solid var(--accent); }
+.edit-tags.empty { border: 1px dashed var(--line); }
+.row-note { font-size: 12px; color: var(--muted); margin-top: 3px; white-space: normal; }
+.row-note:empty { display: none; }
+.who-editor { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.who-editor input {
+  flex: 1 1 160px; min-width: 0; padding: 5px 9px; border-radius: 8px;
+  border: 1px solid var(--line); background: var(--bg); color: var(--text);
+}
+.who-editor button {
+  padding: 5px 12px; border-radius: 8px; cursor: pointer;
+  border: 1px solid var(--line); background: var(--bg); color: var(--text);
+}
+.who-editor button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.who-editor .row-note { flex-basis: 100%; }
 
 .beats { display: flex; gap: 3px; justify-content: flex-end; min-width: 0; overflow: hidden; height: 26px; }
 .beat { flex: 0 0 6px; border-radius: 3px; background: var(--c, var(--empty)); }
@@ -145,20 +178,10 @@ button, input { font: inherit; }
 .note { color: var(--muted); font-size: 13px; align-self: center; }
 
 /* Tag picker, after GitHub's label picker. */
-.tagrow { position: relative; margin-top: 14px; max-width: 420px; }
+.tagline { position: relative; }
 .target:has(.tag-popover) { overflow: visible; position: relative; z-index: 2; }
-.tag-trigger {
-  all: unset; box-sizing: border-box; cursor: pointer; display: block; width: 100%;
-  padding: 6px 8px; margin-left: -8px; border-radius: 8px;
-}
-.tag-trigger:hover .tag-head, .tag-trigger[aria-expanded="true"] .tag-head { color: var(--accent); }
-.tag-trigger:focus-visible { outline: 2px solid var(--accent); }
-.tag-head { display: flex; justify-content: space-between; font-size: 12px; font-weight: 600; color: var(--muted); }
-.tag-chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
-.tag-chips .rtag { font-size: 12px; line-height: 20px; padding: 0 8px; }
-.tag-chips .none { font-size: 13px; color: var(--muted); }
 .tag-popover {
-  position: absolute; top: 28px; left: -8px; width: min(300px, calc(100vw - 32px));
+  position: absolute; top: calc(100% + 6px); left: 0; width: min(300px, calc(100vw - 32px)); cursor: default;
   background: var(--card); border: 1px solid var(--line); border-radius: 10px;
   box-shadow: 0 8px 24px rgb(0 0 0 / 0.18); overflow: hidden;
 }

@@ -49,16 +49,20 @@
 
   <template id="row">
     <article class="target">
-      <button class="head" type="button" aria-expanded="false" title="Show or hide the 24-hour chart and the actions">
+      <div class="head">
+        <button class="expand" type="button" aria-expanded="false" title="Show or hide the 24-hour chart and the actions"></button>
         <span class="badge"></span>
-        <span class="who"><span class="name"></span><span class="host"></span><span class="tags"></span></span>
+        <span class="who">
+          <span class="line"><span class="name"></span><button class="edit-btn edit-target" type="button" data-focus="edit-target" title="Rename, or change the host" aria-label="Rename, or change the host">✎</button></span>
+          <span class="host"></span>
+          <span class="line tagline"><span class="tags"></span><button class="edit-btn edit-tags" type="button" data-focus="edit-tags" title="Edit the tags: labels to filter the list by, e.g. a site, a customer or a service" aria-label="Edit the tags"></button></span>
+        </span>
         <span class="beats" aria-hidden="true"></span>
         <span class="figures"><span class="uptime"></span><span class="latency"></span></span>
-      </button>
+      </div>
       <div class="detail" hidden>
         <div class="chart"></div>
         <div class="stats"></div>
-        <div class="tagrow"></div>
         <div class="actions"></div>
       </div>
     </article>
