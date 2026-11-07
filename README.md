@@ -120,10 +120,11 @@ cycle of 10k checks per 5 minutes uses well under 1% of that.
 zig fetch --save git+https://github.com/zaxified/zig-fping
 ```
 
-`main` follows the current Zig release and requires **Zig 0.17.1** or later
-(0.17.0 miscompiles signed-to-narrower-unsigned `@intCast` in optimized
-builds, ziglang/zig#37131; the package refuses to build with it);
-**v0.2.1** is the latest release (Zig 0.17, `#v0.2.1` pins it). **v0.1.3 is the last release for
+`main` follows the current Zig release. **v0.2.2** is the latest release
+(`#v0.2.2` pins it) and requires **Zig 0.17.1** or later: 0.17.0 miscompiles
+signed-to-narrower-unsigned `@intCast` in optimized builds
+(ziglang/zig#37131), so the package refuses to build with it; v0.2.0 and
+v0.2.1 are the Zig 0.17.0 releases. **v0.1.3 is the last release for
 Zig 0.16** — pin it if your project stays on 0.16
 (`zig fetch --save git+https://github.com/zaxified/zig-fping#v0.1.3`).
 

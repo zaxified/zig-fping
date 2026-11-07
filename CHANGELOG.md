@@ -2,26 +2,6 @@
 
 ## Unreleased
 
-### Zig 0.17.1
-
-The package now requires **Zig 0.17.1** (`.zigversion`,
-`minimum_zig_version`, CI and release workflows, pinned tarball SHA256 in
-`scripts/zig-env.sh`). Zig 0.17.0 lowers a signed-to-narrower-unsigned
-`@intCast` to LLVM `trunc nsw` (ziglang/zig#37131), which lets optimized
-builds fold away range checks on values in the upper half of the destination
-type. Zig does not enforce `minimum_zig_version`, so `src/root.zig` refuses
-to compile with anything older than 0.17.1. No source changes were needed
-otherwise. The vendored `zig-0.17` skill moves to zig-skills `v0.17.1-r1`.
-
-### fping-watch moved out
-
-The example application `example-apps/fping-watch` has left this repository,
-with its history, and continues as **zpinger** in its own repository,
-depending on zig-fping as a pinned package. Its unreleased changes (jitter,
-`--demo`, tags, filters, in-place editing) went with it. Releases no longer
-carry `fping-watch_*.deb`; `scripts/test.sh` and `scripts/release.sh` no
-longer build it. No library or CLI change.
-
 ### Pending upstream (deferred)
 
 To be implemented once the change reaches an upstream release tag
@@ -35,6 +15,48 @@ To be implemented once the change reaches an upstream release tag
   `IP_PKTINFO`/`IPV6_RECVPKTINFO`, so this needs the receive socket options,
   cmsg parsing for the reply's destination address, and that address carried
   through the reply struct into the renderers in `src/cli/output.zig`.
+
+## 0.2.2 — Zig 0.17.1, IPv6 with an IPv4 tail (2026-11-07)
+
+### Zig 0.17.1
+
+The package now requires **Zig 0.17.1** (`.zigversion`,
+`minimum_zig_version`, CI and release workflows, pinned tarball SHA256 in
+`scripts/zig-env.sh`). Zig 0.17.0 lowers a signed-to-narrower-unsigned
+`@intCast` to LLVM `trunc nsw` (ziglang/zig#37131), which lets optimized
+builds fold away range checks on values in the upper half of the destination
+type. Zig does not enforce `minimum_zig_version`, so `src/root.zig` refuses
+to compile with anything older than 0.17.1. The vendored `zig-0.17` skill
+moves to zig-skills `v0.17.1-r1`.
+
+What changes for zfping and the library:
+
+- **IPv6 targets with an IPv4 tail are accepted.** Zig 0.17.0's
+  `IpAddress.parse` rejected every embedded IPv4 form except `::ffff:a.b.c.d`,
+  so 0.2.0/0.2.1 answered "Name or service not known" for NAT64 targets
+  (`64:ff9b::192.0.2.1`), `::192.0.2.1` or `2001:db8::1.2.3.4`, and `-g`
+  rejected them with a usage error; fping accepts all of them. Fixed by Zig
+  0.17.1; covered by unit tests and golden scenarios.
+- **IPv6 addresses are printed like glibc `inet_ntop`.** zfping used std's
+  IPv6 formatter, which prints IPv4-compatible addresses in hex (`::c000:201`
+  where fping prints `::192.0.2.1`) and, since Zig 0.17.1, the NAT64 prefix
+  dotted (`64:ff9b::192.0.2.1` where fping prints `64:ff9b::c000:201`).
+  `netutil.formatIp6` reimplements glibc's rules; `Addr.format` and `-g` use
+  it (checked against glibc on 50 000 generated addresses).
+- The ICMP identifier in the default `.pid` mode (`pid & 0xffff`) was one of
+  the casts #37131 turns into poison for values ≥ 0x8000 on 0.17.0 (found by
+  diffing the LLVM IR of both compilers); requiring 0.17.1 removes it. The
+  other affected casts in zig-fping only carry values far below the poisoned
+  range.
+
+### fping-watch moved out
+
+The example application `example-apps/fping-watch` has left this repository,
+with its history, and continues as **zpinger** in its own repository,
+depending on zig-fping as a pinned package. Its unreleased changes (jitter,
+`--demo`, tags, filters, in-place editing) went with it. Releases no longer
+carry `fping-watch_*.deb`; `scripts/test.sh` and `scripts/release.sh` no
+longer build it. No library or CLI change.
 
 ## 0.2.1 — fping-watch as a Debian package, deployment hardening (2026-10-28)
 
