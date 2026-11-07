@@ -409,5 +409,5 @@ const Barrier = struct {
 
 ## See Also
 
-- **[std.Thread](std-thread.md)** - Higher-level synchronization (Mutex, RwLock, Condition, Semaphore)
-- **[std.Thread.Futex](std-thread.md)** - OS-level blocking primitives
+- **[std.Thread](std-thread.md)** - Replacements for the removed Thread.Mutex/RwLock/Condition/Semaphore (Io.Mutex, Io.Event, ...)
+- **[Futex replacement](std-thread.md)** - `std.Thread.Futex` is removed in 0.16; see `io.futexWait`/`io.futexWake` and the raw-syscall fallback

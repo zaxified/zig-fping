@@ -136,6 +136,11 @@ try Aes256Gcm.decrypt(&decrypted, &ciphertext, tag, associated_data, nonce, key)
 // Returns error.AuthenticationFailed if tag doesn't verify
 ```
 
+0.17.0 on targets without AES hardware: the software AES is bitsliced unless
+`std.options.side_channels_mitigations == .none` (`crypto/aes/soft.zig:6-8,294`), so
+`optimal_parallel_blocks` is larger than 1 and the context is several KB (3024 bytes on s390x
+in a migration probe). See zig-gotchas.md "Known 0.17 library behaviour".
+
 Key constants:
 - `key_length`: 32 bytes (256 bits)
 - `nonce_length`: 12 bytes
@@ -596,17 +601,21 @@ try io.randomSecure(&nonce); // 0.16: std.crypto.random removed
 ```zig
 const argon2 = std.crypto.pwhash.argon2;
 
-// Registration: hash and store
+// Registration: hash and store (the salt is generated internally)
 var buf: [128]u8 = undefined;
-const hash_str = try argon2.strHash(password, null, .interactive_2id, .argon2id, &buf);
+const hash_str = try argon2.strHash(password, .{
+    .allocator = gpa,
+    .params = argon2.Params.interactive_2id,
+    .mode = .argon2id,
+}, &buf, io);
 // Store hash_str in database
 
-// Login: verify
-argon2.strVerify(stored_hash, password, null) catch |err| {
-    if (err == error.PasswordVerificationFailed) {
-        // Invalid password
-    }
-};
+// Login: verify. Fail closed: ANY error (wrong password, corrupted stored
+// hash, OutOfMemory, ...) rejects the login; never `catch {}` or filter
+// on one error and fall through.
+argon2.strVerify(stored_hash, password, .{ .allocator = gpa }, io) catch
+    return error.AuthenticationFailed;
+// Only here is the password accepted.
 ```
 
 ## Side-Channel Protection

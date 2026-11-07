@@ -251,7 +251,7 @@ pub fn CacheTable(comptime K: type, comptime V: type, comptime bucket_count: usi
 }
 ```
 
-No allocations after init. LRU per bucket via rotate. Optional eviction callback via `@hasDecl`.
+No allocations after init. LRU per bucket via rotate. Optional eviction callback via `@hasDecl` (0.17: the consumer's `evicted` must be `pub`, otherwise the check is silently false and the callback is skipped).
 
 ### Intrusive Linked Lists (Ghostty, TigerBeetle)
 

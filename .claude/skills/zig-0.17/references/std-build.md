@@ -1,5 +1,5 @@
 
-# std.Build - Zig Build System Reference (0.17.0)
+# std.Build - Zig Build System Reference (0.17.1)
 
 The Zig build system models projects as directed acyclic graphs (DAG) of build steps. Build scripts are written in Zig itself (`build.zig`), providing full language features during configuration.
 
@@ -31,12 +31,19 @@ pub fn build(b: *std.Build) void {
   poisons the cache — but only when the configurer actually runs; it does not detect
   undeclared reads on a cache hit.
 - `zig build --print-configuration` prints the cached graph as ZON.
-- Paths: `b.build_root` → `b.root` (a `Cache.Path`; `b.root.root_dir.handle` is the `Dir`).
+- Paths: `b.build_root` → `b.root` (a `Cache.Path`: use its methods `b.root.access/openDir/openFile`, which apply `sub_path`; it is non-empty for dependency roots, so `b.root.root_dir.handle` alone is the wrong directory there).
   `b.cache_root` and `b.graph.global_cache_root` are gone (a step can take
   `std.Build.LazyPath.cache_root`). The global cache directory is set with
   `ZIG_GLOBAL_CACHE_DIR`; `zig build` rejects `--global-cache-dir`.
 - `dependOnDirectoryContents` tracks added, removed and renamed entries, not their contents,
-  and is not recursive: declare each scanned directory.
+  and is not recursive: declare each scanned directory. A path that does not exist fails the
+  configuration (`error: configuration failed: FileSystemFailure`): declare the nearest existing
+  ancestor instead.
+- **No custom steps.** `Step` has a closed `tag` (`Configuration.Step.Tag`) and no `makeFn`; code
+  that used to run inside a make function belongs in a host executable run by a Run step
+  (`b.addRunArtifact(tool)`, `run.has_side_effects = true`, `run.setCwd(b.path("."))`, values
+  from `b` passed as arguments, e.g. `run.addPrefixedFileArg("--zig=", b.graph.path(.zig_exe, ""))`).
+  Details and a compiled example: SKILL.md > Build system.
 - The first `zig build` after installing Zig compiles the maker once (measured twice: 108 s
   and 115 s, Zig 0.17.0, x86_64 Linux, 8-core machine).
 
@@ -86,7 +93,7 @@ Methods like `b.addLibrary`, `b.createModule`, `b.dependency` are **unchanged**.
 
 ## Quick Start
 
-### Minimal build.zig (0.15.x)
+### Minimal build.zig (0.17)
 ```zig
 const std = @import("std");
 
@@ -114,7 +121,7 @@ pub fn build(b: *std.Build) void {
 }
 ```
 
-**CRITICAL (0.15.x):** `root_source_file` field in `addExecutable`/`addLibrary`/`addTest` is REMOVED. Use `root_module` with `b.createModule()`.
+**CRITICAL (since 0.15):** `root_source_file` field in `addExecutable`/`addLibrary`/`addTest` is REMOVED. Use `root_module` with `b.createModule()`.
 
 ## Core Concepts
 
@@ -373,7 +380,10 @@ exe.root_module.addOptions("build_options", options);
 
 ## Build Steps
 
-### Creating Custom Steps
+### Named top-level steps (`b.step`)
+
+This creates a *named step* that other steps hang off; it does not create a new kind of step. User-defined step logic (`makeFn`) is gone in 0.17: write a host executable and run it with a Run step (see SKILL.md, "Custom build steps are gone").
+
 ```zig
 // Named top-level step (visible in `zig build --list-steps`)
 const test_step = b.step("test", "Run unit tests");
@@ -477,7 +487,7 @@ update_step.dependOn(&update_src.step);
     .name = .myproject,             // an enum literal, not a string
     .version = "1.0.0",
     .fingerprint = 0x0123456789abcdef, // generated once: zig build prints the value to use
-    .minimum_zig_version = "0.17.0",
+    .minimum_zig_version = "0.17.1",
     .dependencies = .{
         .zlib = .{
             .url = "https://example.com/zlib-zig-1.0.0.tar.gz",
@@ -509,6 +519,17 @@ exe.root_module.linkLibrary(zlib.artifact("z"));
 const include_path = zlib.path("include");
 exe.root_module.addIncludePath(include_path);
 ```
+
+A fetched archive that holds a single top-level directory is unpacked with that directory
+stripped (`Maker/Fetch.zig` takes the package root from the unpack result, not the temporary
+directory), so the path is `dep.path("sqlite3.h")`, not
+`dep.path("sqlite-amalgamation-3490200/sqlite3.h")` as unpacking the archive by hand suggests
+(a migration build failed with `FileNotFound` on the long form). A dependency that is only a
+source archive needs no build script of its own: declare it in `build.zig.zon` with its
+`.url`/`.hash`, then compile it yourself in the consumer, e.g.
+`lib.root_module.addCSourceFile(.{ .file = dep.path("sqlite3.c"), .flags = &.{"-std=c99"} })` and
+`b.addTranslateC(...)` on the header (the shape one project used instead of a wrapper package that
+did not configure on 0.17; not re-run for this reference).
 
 ### Lazy Dependencies
 Lazy dependencies are only fetched when actually used, avoiding unnecessary downloads for platform-specific or optional dependencies.
@@ -575,7 +596,10 @@ run_cmd.addArgs(&.{ "--config", "debug.json" });
 // Change working directory
 run_cmd.setCwd(b.path("data"));
 
-// Set environment variables
+// Set environment variables. The first call freezes the whole environment of this step at
+// configure time (cached): later shell variables never reach it. To keep the live
+// environment, use addSystemCommand(&.{ "env", "DEBUG=1" }) + addArtifactArg(exe) instead
+// (zig-gotchas.md, "The build configuration is cached on inputs it cannot see").
 run_cmd.setEnvironmentVariable("DEBUG", "1");
 
 // Create run step
@@ -588,7 +612,7 @@ run_step.dependOn(&run_cmd.step);
 const cmd = b.addSystemCommand(&.{ "git", "describe", "--tags" });
 
 // Capture output
-const version = cmd.captureStdOut();
+const version = cmd.captureStdOut(.{});
 
 // Use output as file
 const version_file = b.addInstallFile(version, "version.txt");
@@ -617,6 +641,12 @@ exe.root_module.addAnonymousImport("generated", .{
     .root_source_file = generated,
 });
 ```
+
+Run step semantics seen in a gate tool rewritten for 0.17 (planted violation run by the
+migration's reviewer; not re-run for this reference): a non-zero child exit fails the step, also
+with `.infer_from_args` stdio; `has_side_effects = true` bypasses the cache check, so the tool
+runs on every `zig build`; the child's stdout is inherited, so TSV or log output reaches the
+caller of `zig build`.
 
 ## Installing Artifacts
 
@@ -887,7 +917,8 @@ exe.root_module.root_source_file = b.path("src/main.zig");
 exe.root_module.addIncludePath(dep.path("include"));
 
 // Install
-b.installFile(generated_file, "share/output.txt");
+// (b.installFile takes a []const u8 source path, not a LazyPath)
+b.getInstallStep().dependOn(&b.addInstallFile(generated_file, "share/output.txt").step);
 ```
 
 ## LazyPath Deep Dive
@@ -1003,7 +1034,7 @@ ZON (Zig Object Notation) is used for package manifests.
     .fingerprint = 0x0123456789abcdef,
 
     // Minimum Zig version (optional)
-    .minimum_zig_version = "0.17.0",
+    .minimum_zig_version = "0.17.1",
 
     // Dependencies (optional)
     .dependencies = .{
@@ -1109,6 +1140,14 @@ zig build --prefix=/opt/myapp
 zig build --prefix-lib-dir=lib64
 zig build --prefix-exe-dir=sbin
 ```
+
+0.17.1 (`17cf964`) separates where the build writes from where the files will live: the
+`install_*` path bases are `$DESTDIR` + the prefix, and the new `deployed_prefix`,
+`deployed_lib`, `deployed_bin`, `deployed_include` bases (`std.Build.Configuration.LazyPath.Relative.Base`;
+`b.graph.path(.deployed_lib, "foo.pc")` or `.{ .relative = .{ .base = .deployed_lib, .sub_path = "foo.pc" } }`) are the paths on the target system, unaffected by `$DESTDIR`.
+They exist for files that must embed absolute install paths (a pkg-config `.pc` file); avoid
+embedding absolute paths otherwise. The configure phase cannot depend on either kind (it
+panics). Read from the 0.17.1 source, not run for this skill.
 
 ## Common Patterns
 

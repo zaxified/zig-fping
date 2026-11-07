@@ -120,8 +120,10 @@ cycle of 10k checks per 5 minutes uses well under 1% of that.
 zig fetch --save git+https://github.com/zaxified/zig-fping
 ```
 
-`main` follows the current Zig release; **v0.2.1** is the latest release
-(Zig 0.17, `#v0.2.1` pins it). **v0.1.3 is the last release for
+`main` follows the current Zig release and requires **Zig 0.17.1** or later
+(0.17.0 miscompiles signed-to-narrower-unsigned `@intCast` in optimized
+builds, ziglang/zig#37131; the package refuses to build with it);
+**v0.2.1** is the latest release (Zig 0.17, `#v0.2.1` pins it). **v0.1.3 is the last release for
 Zig 0.16** — pin it if your project stays on 0.16
 (`zig fetch --save git+https://github.com/zaxified/zig-fping#v0.1.3`).
 
@@ -264,7 +266,7 @@ unshare -Urn sh -c 'ip link set lo up; ./zig-out/bin/zfping 127.0.0.1 ::1'
 ## Development
 
 Everything works from a plain `git clone`, without sudo and without a
-pre-installed Zig — the pinned toolchain (`.zigversion`, 0.17.0) is
+pre-installed Zig — the pinned toolchain (`.zigversion`, 0.17.1) is
 downloaded automatically into `.zig-toolchain/` when missing, and checked
 against the SHA256 pinned in `scripts/zig-env.sh`:
 
@@ -277,7 +279,7 @@ scripts/release.sh   # the above + static binaries for all targets into
 scripts/fuzz.sh      # deterministic-seed fuzzing of the parser/option/target harnesses
 ```
 
-Or directly with your own Zig 0.17.0:
+Or directly with your own Zig 0.17.1 or later:
 
 ```sh
 zig build -Doptimize=ReleaseSafe       # library + zfping (shipped build mode)

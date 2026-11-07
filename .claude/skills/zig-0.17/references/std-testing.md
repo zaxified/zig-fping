@@ -93,7 +93,7 @@ try testing.expectFmt("hello world", "{s} {s}", .{"hello", "world"});
 
 ## Testing Allocator
 
-`std.testing.allocator` is a `std.heap.SafeAllocator` (0.17; `DebugAllocator` before) that detects memory leaks, double frees and use-after-free. **Only available in test builds.** The test runner creates a fresh one for every test. It never reuses memory, so a test that allocates and frees in a loop grows in RSS with its total allocation; writes after free are checked in every optimize mode; allocation stack traces are recorded only in Debug; and since 0.17 a leak fails the test in every optimize mode, ReleaseFast included.
+`std.testing.allocator` is a `std.heap.SafeAllocator` (0.17; `DebugAllocator` before) that detects memory leaks, double frees and use-after-free. **Only available in test builds.** The test runner creates a fresh one for every test. It hands large allocations and emptied 8 KiB buckets back to `page_allocator`, so an alloc/free loop stays flat (probe on 0.17.0: 2 000 000 x 64 B, RSS 700 -> 708 KiB in ReleaseSafe), but slots inside a bucket are never reused, so long-lived small allocations mixed with short-lived ones pin buckets; writes after free are checked in every optimize mode; allocation stack traces are recorded only in Debug; and since 0.17 a leak fails the test in every optimize mode, ReleaseFast included.
 
 ```zig
 test "with allocator" {
@@ -185,6 +185,23 @@ test "no leaks on allocation failure" {
 - `error.SwallowedOutOfMemoryError` - `OutOfMemory` was caught but not propagated
 - `error.NondeterministicMemoryUsage` - allocation count varies between runs
 
+**In-place resizing (0.17.1 behaviour first).** On 0.17.1 (`7c793c2`, #37141)
+`checkAllAllocationFailures` builds every `FailingAllocator` with `.resize_fail_index = 0`
+(`testing.zig`): every `resize` and `remap` inside the check fails, so the code under test always
+takes its fresh-`alloc` path there, and the runs are deterministic. A test that relied on an
+in-place grow inside the check now sees one more `alloc` (and one more failure point).
+On 0.17.0 the check counts allocator calls in a baseline run
+(`testing.zig` `checkAllAllocationFailures`, the `needed_alloc_count` run) and fails with
+`NondeterministicMemoryUsage` when a later run used fewer. On 0.17.0 a function whose scratch
+allocator resizes in place (a `std.heap.BufferFirstAllocator` over a stack buffer, a
+`SafeAllocator`) can trip it, because a resize or remap that succeeds in place in one run and fails in another (forcing a
+fresh `alloc`) changes the number of `alloc` calls the baseline counted (only `alloc` is counted,
+`FailingAllocator` keeps one separate counter, `resize_index` in `testing/FailingAllocator.zig`, shared by `resize` and `remap`) (seen in a migration: two tests of a JSON validator; a three-line `ArrayList` growth probe did
+NOT reproduce it on 0.17.0). Workaround for code that must pass on 0.17.0: inside the function handed to `checkAllAllocationFailures`, wrap the allocator you
+were given in one that forwards `alloc`/`free` and refuses `resize` (`false`) and `remap`
+(`null`), and use the wrapper everywhere below that point (this is what 0.17.1 does itself);
+mark it `// zig 0.17.0 only: 7c793c2` so it can be deleted once the project requires 0.17.1.
+
 ## Temporary Directory
 
 Create an isolated temp directory for file system tests:
@@ -262,7 +279,7 @@ test "conditional skip" {
 }
 
 test "skip if feature unavailable" {
-    if (!@hasDecl(std.os, "linux")) return error.SkipZigTest;
+    if (builtin.target.os.tag != .linux) return error.SkipZigTest;
     // Linux-specific test...
 }
 ```
@@ -271,7 +288,8 @@ test "skip if feature unavailable" {
 
 ```zig
 test "with logging" {
-    // Only shown when test fails or with --verbose
+    // stderr output is always shown, also for a passing test; under `zig build`
+    // it is followed by a harmless `failed command:` line (see zig-gotchas.md)
     std.debug.print("Debug info: {}\n", .{value});
 }
 
@@ -323,6 +341,9 @@ fn fuzzOne(_: void, smith: *std.testing.Smith) !void {
 zig build test --fuzz=200000   # bounded run, prints a coverage report
 zig build test --fuzz          # unbounded + web UI of covered lines
 ```
+
+Do not take a verdict from the exit status: `--fuzz` exits 0 even when it found a crash and does
+not report a hang (see [Quality Tooling](quality-tooling.md) and zig-gotchas.md, "Testing and fuzzing").
 
 A plain `zig build test` runs the fuzz test once with a trivial input.
 The corpus persists in `.zig-cache/f/` and compounds across runs — that

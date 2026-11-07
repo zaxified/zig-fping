@@ -114,9 +114,11 @@ and has been stable on develop for a few months.
 ## Environment
 
 - **Zig version**: driven by `.zigversion` (read by the VSCode Zig extension)
-  — currently 0.17.0.
+  — currently 0.17.1 (`minimum_zig_version` too; `src/root.zig` refuses
+  0.17.0 at comptime because of the #37131 `@intCast` miscompile, since Zig
+  does not enforce `minimum_zig_version`).
   - binary: the VS Code Zig extension's
-    `~/.config/Code/User/globalStorage/ziglang.vscode-zig/zig/x86_64-linux-0.17.0/zig`
+    `~/.config/Code/User/globalStorage/ziglang.vscode-zig/zig/x86_64-linux-0.17.1/zig`
     (first on PATH; also exported as `$ZIG` via `.claude/settings.local.json`).
     `scripts/zig-env.sh` downloads into `.zig-toolchain/` only when no matching
     zig is found — that copy is a fallback for CI/other machines, not the local one.
@@ -125,7 +127,7 @@ and has been stable on develop for a few months.
   - NOTE: if `zig version` in PATH does not match `.zigversion` (stale
     session), use the full path / `$ZIG`.
 - **Zig std sources** (authoritative for 0.17 API checks):
-  `~/.config/Code/User/globalStorage/ziglang.vscode-zig/zig/x86_64-linux-0.17.0/lib/std/`
+  `~/.config/Code/User/globalStorage/ziglang.vscode-zig/zig/x86_64-linux-0.17.1/lib/std/`
 - **fping C reference**: `/tmp/fping-ref/src/` (shallow clone; restore after
   reboot with `git clone https://github.com/schweikert/fping /tmp/fping-ref`
   — full clone preferred now, the upstream-tracking procedure needs history).

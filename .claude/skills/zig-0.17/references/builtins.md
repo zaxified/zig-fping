@@ -35,6 +35,9 @@ Convert between integer types. Runtime safety check if value doesn't fit.
 const big: u64 = 100;
 const small: u8 = @intCast(big);  // OK if value fits
 ```
+From a signed to a narrower *unsigned* type (`i64` to `u32`) `@intCast` and `std.math.cast` are
+miscompiled in optimized builds in 0.17.0 (#37131, fixed in 0.17.1): code that must build with
+0.17.0 casts to the same-width unsigned type first, each step range-checked, see zig-gotchas.md.
 
 ### @floatCast
 ```zig
@@ -120,6 +123,8 @@ Remove `volatile` qualifier from pointer.
 @bitCast(value: anytype) anytype
 ```
 Reinterpret bits as different type. Sizes must match. Return type inferred.
+
+0.17: arrays and vectors behave as little-endian on every target (a `[N]u8` cast is not "the bytes as they lie in memory" on big-endian), `@bitCast` of an extern struct is a compile error in both directions (use `@ptrCast` / `std.mem.bytesToValue`), and a `[N]u8` <-> wider-lane vector or >= 16-byte integer cast (N >= 16) compiles to a byte loop (`[4]u8` <-> `u32` and `[8]u8` <-> `u64` stay a single load). See SKILL.md "Silent changes" and zig-gotchas.md "`@bitCast` between a byte array and wider lanes".
 ```zig
 const bits: u32 = @bitCast(@as(f32, 1.0));
 const f: f32 = @bitCast(@as(u32, 0x3f800000));
@@ -403,7 +408,7 @@ const bits = @bitSizeOf(u24);  // 24
 ```
 Alignment requirement of type.
 ```zig
-const align = @alignOf(u64);  // typically 8
+const a = @alignOf(u64);  // typically 8 (`align` is a keyword)
 ```
 
 ### @offsetOf
@@ -527,7 +532,7 @@ const name = @typeName(u32);  // "u32"
 ```zig
 @hasDecl(comptime T: type, comptime name: []const u8) bool
 ```
-Check if type has declaration (const, fn, etc.).
+Check if type has declaration (const, fn, etc.). **0.17: sees only `pub` declarations**, also from inside the same file (see SKILL.md "Silent changes").
 ```zig
 if (@hasDecl(T, "init")) { T.init(); }
 ```
@@ -679,9 +684,10 @@ const v: Vec4f = .{ 1.0, 2.0, 3.0, 4.0 };
 ```zig
 @splat(value: anytype) anytype
 ```
-Create vector with all elements equal to value. Return type inferred.
+Create a vector **or array** with all elements equal to value. Return type inferred. Since 0.17 this is also how an array is filled (the `**` operator on arrays is removed).
 ```zig
 const ones: @Vector(4, f32) = @splat(1.0);
+const sevens: [4]u8 = @splat(7);
 ```
 
 ### @reduce
@@ -751,8 +757,12 @@ pub fn build(b: *std.Build) void {
 // src/main.zig
 const c = @import("c");
 ```
-`b.addTranslateC` still exists but is deprecated in favor of the package. More options:
-https://codeberg.org/ziglang/translate-c#options
+`b.addTranslateC(.{ .root_source_file = b.path("src/c.h"), .target = target, .optimize = optimize })`
+still exists (the toolchain ships the translator; `.createModule()` gives the module). The
+release notes call it deprecated in favor of the package, but the 0.17.0 std source carries no
+deprecation marker. The built-in step needs no dependency and no network; the package has more
+options: https://codeberg.org/ziglang/translate-c#options (SKILL.md, "Removed syntax and
+builtins", has the details and what was and was not run).
 
 ### @extern
 ```zig

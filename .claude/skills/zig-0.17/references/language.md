@@ -183,7 +183,7 @@ while (i < 10) : (i += 1) { ... }
 while (iterator.next()) |item| { ... }
 
 // With error union
-while (reader.readByte()) |byte| {
+while (reader.takeByte()) |byte| {
     ...
 } else |err| {
     if (err != error.EndOfStream) return err;

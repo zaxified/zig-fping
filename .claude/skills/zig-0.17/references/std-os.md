@@ -1,4 +1,4 @@
-# std.os - OS-Specific APIs Reference (0.16)
+# std.os - OS-Specific APIs Reference (0.17.1; the 0.16 changes below still hold)
 
 Thin wrappers around OS-specific APIs. `std.os` itself shrank a lot in 0.16 — it is now just a namespace of six platform submodules, nothing else at its own top level. Converts errno-style error codes to Zig errors, provides slice-accepting APIs alongside null-terminated ones, and offers cross-platform abstractions for POSIX systems (via `std.posix`).
 
@@ -44,7 +44,7 @@ const file = try std.Io.Dir.cwd().openFile(io, "data.txt", .{});
 const fd = try std.posix.openat(std.posix.AT.FDCWD, "data.txt", .{}, 0);
 
 // OS-specific (platform-specific features)
-const result = std.os.linux.syscall3(.read, fd, buf.ptr, buf.len);
+const result = std.os.linux.syscall3(.read, @as(usize, @intCast(fd)), @intFromPtr(buf.ptr), buf.len);
 ```
 
 ## Linux-Specific APIs

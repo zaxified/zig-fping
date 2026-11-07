@@ -1,6 +1,6 @@
-# std.Thread - Threading and Concurrency API Reference (0.16)
+# std.Thread - Threading and Concurrency API Reference (0.17.1; "0.16" marks what changed in 0.16)
 
-Thread spawning and synchronization in Zig 0.16.
+Thread spawning and synchronization in Zig 0.17.1.
 
 ## Critical: Sync Primitives Removed From std.Thread (0.16)
 
@@ -331,6 +331,9 @@ event.waitTimeout(io, .{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake 
     error.Timeout => { /* handle timeout */ },
     error.Canceled => return err,
 };
+// 0.17.0 only (fixed in 0.17.1, c99f5c9): waitTimeout can return error.Timeout on a spurious
+// wakeup while the event is still unset (#36912). Code that must build with 0.17.0 re-checks
+// event.isSet() and the clock in a loop (see mcp-server-patterns.md `waitEvent`).
 ```
 
 ### Group (was WaitGroup / Pool)
@@ -433,6 +436,7 @@ fn parallelMap(
     comptime mapFn: fn (T) U,
 ) ![]U {
     const results = try allocator.alloc(U, items.len);
+    errdefer allocator.free(results);
     var group: std.Io.Group = .init;
 
     for (items, 0..) |item, i| {

@@ -35,20 +35,20 @@ Full syntax: `{[arg]:[fill][alignment][width][.precision][specifier]}`
 std.debug.print("{d:0>8}\n", .{42});        // "00000042"
 std.debug.print("{s:_^10}\n", .{"hi"});     // "____hi____"
 std.debug.print("{d:.2}\n", .{3.14159});    // "3.14"
-std.debug.print("{0} {1} {0}\n", .{"a", "b"}); // "a b a"
+std.debug.print("{0s} {1s} {0s}\n", .{"a", "b"}); // "a b a"
 ```
 
 ### Named Arguments
 
 ```zig
-std.debug.print("{name}: {value}\n", .{ .name = "x", .value = 42 });
+std.debug.print("{[name]s}: {[value]d}\n", .{ .name = "x", .value = 42 });
 ```
 
 ### Runtime Width/Precision
 
 ```zig
-std.debug.print("{d:[width]}\n", .{ .width = @as(usize, 8), 42 });
-std.debug.print("{d:.[prec]}\n", .{ .prec = @as(usize, 2), 3.14159 });
+std.debug.print("{[v]d:[w]}\n", .{ .v = 42, .w = @as(usize, 8) });
+std.debug.print("{[v]d:.[p]}\n", .{ .v = 3.14159, .p = @as(usize, 2) });
 ```
 
 ### Escape Braces

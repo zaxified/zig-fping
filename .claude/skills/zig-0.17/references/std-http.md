@@ -1,6 +1,24 @@
-# std.http Reference (0.17.0)
+# std.http Reference (0.17.1)
 
 HTTP client and server implementation with TLS, connection pooling, compression, and WebSocket support.
+
+**TLS limit in 0.17.0 and 0.17.1 (`crypto/Certificate.zig` unchanged):** `std.http.Client` over https (`std.crypto.tls.Client`) does not check that
+an issuer is a CA, so a holder of any publicly trusted leaf certificate can sign a certificate
+for another host and be accepted. Do not rely on it alone against an active attacker; pin the
+server's certificate (see "TLS Configuration") or use a TLS library that validates the chain
+(ask the user before adding a dependency). Details: zig-gotchas.md.
+
+**Message bodies in 0.17.1** (`15c1d31`, `std/http.zig`, `http/Client.zig`): whether a message
+has a body is decided by its headers, not its method (`requestHasBody` / `responseHasBody` are
+no longer consulted; only `HEAD` is special). On 0.17.0 the server ignored a body sent with a
+`GET`/`DELETE`/`OPTIONS` request (its bytes stayed in the stream), and the client asserted in
+`sendBodiless` on a method that "has a body" (a bodiless `POST`) and in `sendBody` on one that
+"has none" (a `DELETE` with a body); on 0.17.1 both work. A request without `Content-Length` and
+`Transfer-Encoding` has no body (RFC 7230). The client
+returns a connection to the pool only after the request body was ended (`BodyWriter.end`), so an
+unframed request no longer poisons the pool. A hand-built `std.http.Reader` needs the new
+required field `side` (`.request` for the server-side reader, which reads requests;
+`.response` for the client-side reader, which reads responses): code that fills the struct itself stops compiling, loudly.
 
 ## Table of Contents
 - [HTTP Client](#http-client)
@@ -13,6 +31,8 @@ HTTP client and server implementation with TLS, connection pooling, compression,
 
 ### Quick Fetch (Simple Requests)
 
+The https examples on this page use the system CA bundle; see "TLS Configuration" for what std TLS does not verify.
+
 ```zig
 const std = @import("std");
 
@@ -21,6 +41,7 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
+    // Executable: prefer init.io. A bare `.init(allocator, .{})` starts children with an empty environment.
     var threaded: std.Io.Threaded = .init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -255,11 +276,68 @@ defer client.deinit();
 client.tls_buffer_size = std.crypto.tls.Client.min_buffer_len;
 
 // Force a root-certificate rescan on the next HTTPS request:
-// when `now` is null the client re-checks the time and rescans the system CA bundle
+// when `now` is null the client re-checks the time and rescans the system CA bundle.
+// NOT for a pinned client (see "What std TLS verifies" below): it replaces the pinned
+// bundle with the system one.
 client.now = null;
 
 // Disable TLS at compile time via std.options.http_disable_tls
 ```
+
+**What std TLS verifies, and what it does not.** The client checks the host name against the
+first certificate, issuer names, validity dates and each signature
+(`crypto/Certificate.zig:259-308`, `crypto/tls/Client.zig:651,667`). It does not check
+basicConstraints (`CA:TRUE`), keyUsage or pathLen anywhere. A network attacker who holds a
+certificate that a trusted CA issued for *any* host can sign a certificate for *your* host
+with it, send both, and the chain verifies. For anything where the server's authenticity
+matters (credentials, software updates, remote commands) do not rely on the system CA bundle
+through `std.http.Client` alone. Two ways out, the second needs the user's decision:
+
+1. Pin the server's certificate: fill `client.ca_bundle` with only that certificate and set
+   `client.now`, so the client keeps your bundle instead of rescanning the system's
+   (`http/Client.zig:1707-1725`). **This works only for a self-signed server certificate that
+   is its own trust anchor** (or a private CA that signs no other leaf). Compiled and run on
+   0.17.0 (Debug, ReleaseSafe) against a loopback server with a self-signed certificate: the
+   pinned fetch returned 200; an empty bundle, and a different certificate for the same name,
+   were refused. It has to be updated when the server's certificate is replaced. Limits:
+   - A certificate issued by a CA, put alone into the bundle, is refused (the bundle is
+     searched for the *issuer* of each certificate the server sends, never for the
+     certificate itself). That fails closed.
+   - Do not "fix" that by putting the issuing intermediate or root CA into the pin bundle:
+     the attack above works again (any leaf of that CA can sign a certificate for your host).
+   - Never set `client.now = null` on a pinned client: the next request replaces the pinned
+     bundle with the system bundle.
+   For a public server (CA-issued certificate) the remaining route is a TLS library that
+   validates the chain, or a public-key check outside `std.http.Client`: the user's decision.
+2. Use a TLS library that validates the whole chain. Ask the user before adding a dependency.
+
+```zig
+const std = @import("std");
+
+pub fn main(init: std.process.Init) !void {
+    const gpa = init.gpa;
+    const io = init.io;
+
+    var client: std.http.Client = .{ .allocator = gpa, .io = io };
+    defer client.deinit();
+
+    // Trust anchors: only the pinned certificate (a PEM file shipped with the program).
+    const now = std.Io.Clock.real.now(io);
+    try client.ca_bundle.addCertsFromFilePath(gpa, io, now, std.Io.Dir.cwd(), "pinned.pem");
+    client.now = now; // non-null: no system-bundle rescan, the bundle above is used as is
+
+    var body_buf: [65536]u8 = undefined;
+    var body: std.Io.Writer = .fixed(&body_buf);
+    const res = try client.fetch(.{
+        .location = .{ .url = "https://server.example/" },
+        .response_writer = &body,
+    });
+    std.debug.print("status {d}\n", .{@backingInt(res.status)});
+}
+```
+
+This is correct only for a self-signed server certificate that is itself the trust anchor (see the limits above: a CA-issued leaf alone is refused, and adding a CA to the bundle undoes the pin). The
+`readIndirect` defects in zig-gotchas.md also apply: do not point this client at untrusted servers.
 
 ## HTTP Server
 
@@ -271,6 +349,7 @@ const net = std.Io.net;  // 0.16: std.net is gone, use std.Io.net (see std-net.m
 const http = std.http;
 
 pub fn main() !void {
+    // Executable: prefer init.io. A bare `.init(...)` starts children with an empty environment.
     var threaded: std.Io.Threaded = .init(std.heap.page_allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -467,13 +546,14 @@ try ws.flush();
 
 ```zig
 const Method = enum {
-    GET, HEAD, POST, PUT, DELETE, CONNECT, OPTIONS, TRACE, PATCH,
+    GET, HEAD, POST, PUT, DELETE, CONNECT, OPTIONS, TRACE, PATCH, QUERY,
 
-    pub fn requestHasBody(m: Method) bool;   // POST, PUT, PATCH
-    pub fn responseHasBody(m: Method) bool;  // GET, POST, DELETE, CONNECT, OPTIONS, PATCH
-    pub fn safe(m: Method) bool;             // GET, HEAD, OPTIONS, TRACE
-    pub fn idempotent(m: Method) bool;       // GET, HEAD, PUT, DELETE, OPTIONS, TRACE
-    pub fn cacheable(m: Method) bool;        // GET, HEAD
+    // Since 0.17.1 std.http itself no longer consults these two (see top of file)
+    pub fn requestHasBody(m: Method) bool;   // POST, PUT, PATCH, QUERY
+    pub fn responseHasBody(m: Method) bool;  // GET, POST, PUT, DELETE, CONNECT, OPTIONS, PATCH, QUERY
+    pub fn safe(m: Method) bool;             // GET, HEAD, OPTIONS, TRACE, QUERY
+    pub fn idempotent(m: Method) bool;       // GET, HEAD, PUT, DELETE, OPTIONS, TRACE, QUERY
+    pub fn cacheable(m: Method) bool;        // GET, HEAD, QUERY
 };
 ```
 

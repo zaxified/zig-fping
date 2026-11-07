@@ -1,6 +1,6 @@
 # std.tar - Tar Archive API Reference
 
-Tar archive reading and writing in Zig 0.17.0. Supports POSIX ustar, GNU extensions for long names, and pax extended headers.
+Tar archive reading and writing in Zig 0.17.1. Supports POSIX ustar, GNU extensions for long names, and pax extended headers.
 
 ## Table of Contents
 - [Module Structure](#module-structure)
@@ -68,12 +68,10 @@ pub const File = struct {
 
 File content must be read before calling `next()` again:
 
-**Untrusted archive:** `file.name` comes from the archive and may contain `..` or be absolute (zip-slip). Validate it (no `..` component, not absolute) before using it as a path, or extract with `std.tar.extract` (see "Extracting to Filesystem"), which does the checks.
-
 ```zig
 while (try it.next()) |file| {
     if (file.kind == .file) {
-        // Option 1: Stream to writer (file.name must be validated first, see above)
+        // Option 1: Stream to writer (file.name must be validated first, see "Untrusted archive" below)
         var buf: [1024]u8 = undefined;
         const output_file = try dir.createFile(io, file.name, .{});
         defer output_file.close(io);
@@ -81,11 +79,52 @@ while (try it.next()) |file| {
         try it.streamRemaining(file, &file_writer.interface);
         try file_writer.interface.flush();
 
-        // Option 2: Stream to allocated buffer
+        // Option 2: Stream to allocated buffer. file.size comes from the archive: cap it first
+        if (file.size > 64 * 1024 * 1024) return error.FileTooLarge;
         var content: std.Io.Writer.Allocating = .init(allocator);
         defer content.deinit();
         try it.streamRemaining(file, &content.writer);
         const bytes = content.written();  // []const u8
+    }
+}
+```
+
+**Untrusted archive:** `file.name` comes from the archive and may contain `..` or be absolute (zip-slip). Validate it (no `..` component, not absolute) before using it as a path. `std.tar.extract` does **not** make an archive safe: it sanitizes entry *names* only (`sanitizePath`, `lib/std/tar.zig:676-705`), while a symlink entry's target (`file.link_name`) goes unchecked into `dir.symLink` (`tar.zig:634-636, 664-674`), and files are created without `resolve_beneath`. An archive with `x -> /some/abs/dir` followed by `x/file` therefore writes outside the destination. For untrusted input use the iterator, reject `.sym_link` entries, validate names, and extract into a fresh empty directory (compiled and run on 0.17.0):
+
+```zig
+fn nameIsSafe(name: []const u8) bool {
+    // Conservative on purpose: `\` and `:` are rejected too, so the check also holds on
+    // Windows (`..\x`, `\x`, `C:\x`, UNC `\\host\share`); it refuses legal POSIX names with those bytes.
+    if (name.len == 0 or name[0] == '/' or std.mem.findAny(u8, name, "\\:\x00") != null) return false;
+    var parts = std.mem.splitScalar(u8, name, '/');
+    while (parts.next()) |part| {
+        if (std.mem.eql(u8, part, "..")) return false;
+    }
+    return true;
+}
+
+fn extractUntrusted(io: std.Io, dest: std.Io.Dir, reader: *std.Io.Reader) !void {
+    var name_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var link_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var it: std.tar.Iterator = .init(reader, .{
+        .file_name_buffer = &name_buf,
+        .link_name_buffer = &link_buf,
+    });
+    while (try it.next()) |entry| {
+        if (!nameIsSafe(entry.name)) return error.UnsafeTarEntry;
+        switch (entry.kind) {
+            .sym_link => return error.SymlinkInUntrustedTar, // or skip it
+            .directory => try dest.createDirPath(io, entry.name),
+            .file => {
+                if (std.Io.Dir.path.dirname(entry.name)) |parent| try dest.createDirPath(io, parent);
+                const out = try dest.createFile(io, entry.name, .{ .exclusive = true });
+                defer out.close(io);
+                var wbuf: [4096]u8 = undefined;
+                var fw = out.writer(io, &wbuf);
+                try it.streamRemaining(entry, &fw.interface);
+                try fw.interface.flush();
+            },
+        }
     }
 }
 ```
@@ -104,7 +143,7 @@ pub const Options = struct {
 
 ### extract
 
-Extract entire archive to a directory:
+Extract entire archive to a directory. **Trusted archives only**: names are sanitized but symlink targets are not (see "Untrusted archive" above for the safe pattern):
 
 ```zig
 const data = @embedFile("archive.tar");
@@ -195,7 +234,9 @@ var src_buf: [4096]u8 = undefined;
 var src_reader = src_file.reader(io, &src_buf);
 const stat = try src_file.stat(io);
 // Stat.mtime is `Io.Timestamp` (nanoseconds); writeFile wants POSIX seconds.
-const mtime_secs: u64 = @intCast(@divTrunc(stat.mtime.nanoseconds, std.time.ns_per_s));
+// i96 -> u96 -> u64, each step range-checked (also safe on 0.17.0, see #37131 in zig-gotchas.md)
+const secs = @divTrunc(stat.mtime.nanoseconds, std.time.ns_per_s);
+const mtime_secs: u64 = std.math.cast(u64, std.math.cast(u96, secs) orelse 0) orelse 0;
 
 try w.writeFile("data.txt", &src_reader, mtime_secs);
 
@@ -387,7 +428,8 @@ fn createTarFromDir(io: std.Io, allocator: Allocator, source_dir: std.Io.Dir, ro
                 var buf: [4096]u8 = undefined;
                 var file_reader = file.reader(io, &buf);
                 const stat = try file.stat(io);
-                const mtime_secs: u64 = @intCast(@divTrunc(stat.mtime.nanoseconds, std.time.ns_per_s));
+                const secs = @divTrunc(stat.mtime.nanoseconds, std.time.ns_per_s);
+                const mtime_secs: u64 = std.math.cast(u64, std.math.cast(u96, secs) orelse 0) orelse 0; // two steps: safe on 0.17.0 too (#37131)
                 try w.writeFile(entry.path, &file_reader, mtime_secs);
             },
             .sym_link => {
@@ -419,10 +461,12 @@ fn extractFile(tar_data: []const u8, target_name: []const u8, allocator: Allocat
 
     while (try it.next()) |file| {
         if (file.kind == .file and std.mem.eql(u8, file.name, target_name)) {
+            // file.size comes from the archive: cap it before allocating
+            if (file.size > 64 * 1024 * 1024) return error.FileTooLarge;
             var content: std.Io.Writer.Allocating = .init(allocator);
             errdefer content.deinit();
             try it.streamRemaining(file, &content.writer);
-            return content.toOwnedSlice();
+            return try content.toOwnedSlice();
         }
     }
     return null;

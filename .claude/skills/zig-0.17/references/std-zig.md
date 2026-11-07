@@ -88,6 +88,12 @@ const Token = struct {
 };
 ```
 
+**0.17 token tags:** `Token.Tag` has no `asterisk_asterisk` (0.16 `zig/tokenizer.zig` had it): the
+`**` operator was removed, and `**` now lexes as two `asterisk` tokens (0.17.0
+`zig/tokenizer.zig` lists `asterisk`, `asterisk_equal`, `asterisk_percent`, ... only). A lint or
+fingerprint tool that tokenizes Zig changes its output on the same text (two modules' source
+fingerprints differed for this reason in a migration).
+
 ### Common Token Tags
 ```zig
 .identifier          // Variable/function names

@@ -1,6 +1,6 @@
 # Zig Patterns Reference
 
-Comprehensive patterns for writing idiomatic Zig code. This reference contains best practices extracted from the Zig standard library and established community idioms (checked against Zig 0.17.0 unless a section says it is an excerpt from older std source).
+Comprehensive patterns for writing idiomatic Zig code. This reference contains best practices extracted from the Zig standard library and established community idioms (checked against Zig 0.17.0 and the 0.17.1 diff unless a section says it is an excerpt from older std source).
 
 ## Table of Contents
 
@@ -63,8 +63,9 @@ Comprehensive patterns for writing idiomatic Zig code. This reference contains b
 
 #### Allocator Setup
 ```zig
-// Safe allocator (development - detects leaks, use-after-free; never reuses memory)
-// In main(init: std.process.Init) prefer init.gpa. Production: std.heap.smp_allocator.
+// Safe allocator (development - detects leaks, use-after-free; a bucket returns to the backing only when all its allocations are freed)
+// In main(init: std.process.Init) prefer init.gpa. std.heap.smp_allocator is the ReleaseFast
+// candidate, but soak-test its RSS first (it grew +5.4 MB/min in one project, SKILL.md "Naming Changes").
 // Note: DebugAllocator was renamed to SafeAllocator in 0.17
 var gpa: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
 defer _ = gpa.deinit();
@@ -139,6 +140,8 @@ try stdout.flush();
 ### HTTP Client
 
 See [std-http.md](std-http.md) for full documentation including server, WebSocket, and compression.
+Over https, std TLS does not verify that an issuer is a CA (a holder of any trusted leaf can
+impersonate any host): see "TLS Configuration" there before relying on it.
 
 ```zig
 // Quick fetch (simple requests)
@@ -288,6 +291,8 @@ These patterns are extracted from the Zig standard library and represent establi
 Use a local struct with `@fieldParentPtr` to capture context when you need a function pointer with associated state.
 
 ```zig
+// Excerpt from older std source (0.15 Thread.Pool/WaitGroup, removed in 0.16): shows the
+// @fieldParentPtr closure technique only; the types it uses no longer exist.
 pub fn spawnWg(pool: *Pool, wait_group: *WaitGroup, comptime func: anytype, args: anytype) void {
     wait_group.start();
 
@@ -507,7 +512,7 @@ fn swizzleRgbaToBgra(rgba: [4]u8) [4]u8 {
 const first, _, const third, _ = some_array;
 
 // Works with comptime
-comptime const x, const y = .{ 1, 2 };
+const x, const y = comptime .{ 1, 2 };  // `comptime const` is an error
 ```
 
 **When to use:** Multiple return values, array element extraction, SIMD vector unpacking.
@@ -593,6 +598,8 @@ pub const PaxIterator = struct {
 Use `pub const init: T = .{...};` for default/initial values.
 
 ```zig
+// Excerpt from older std source (0.15 Thread.Mutex.Recursive, removed in 0.16): shows the
+// `pub const init: T = .{...}` idiom only.
 // GOOD: Named constant with explicit type
 pub const Recursive = struct {
     mutex: Mutex,

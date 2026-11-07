@@ -1,22 +1,22 @@
 ---
 name: zig-0.17
-description: "Zig 0.17.0 patterns, checked against the released standard library. Use when writing, reviewing, or debugging Zig code for Zig 0.17.x (zig version / minimum_zig_version in build.zig.zon; a 0.16 project uses the zig skill instead), build.zig and build.zig.zon files, or comptime metaprogramming. Covers the 0.17 changes: array ** removed (@splat), errdefer capture and @cImport removed (translate-c package), @intFromEnum to @backingInt, struct-of-arrays @typeInfo (field_names, field_types), @bitCast on extern structs, @hasDecl pub-only, std.builtin to std.lang with .debug/.safe/.fast/.small, SafeAllocator and BufferFirstAllocator, Allocator.print and mem.print, mem.find, zon.parse with an arena, HostName.fromUri, b.args to addPassthruArgs, the configurer/maker build split with its cached configuration (undeclared configure-time reads go stale: dependOnDirectoryContents, poisonCache), optimize-mode spellings on the CLI, incremental builds with the self-hosted backend, and zig-pkg/. Also prevents older patterns from training data: the std.Io instance threaded through files, sockets, clocks and locks (std.fs to std.Io.Dir/File, std.net to std.Io.net, std.time timestamps and Timer to std.Io.Clock, std.Thread.Mutex/Condition/Pool to std.Io.Mutex/Condition/Group, std.crypto.random to io.randomSecure), main(init: std.process.Init), build system APIs (root_module, Compile methods to Module methods), buffered Reader/Writer with flush, container initialization (.empty/.init), unmanaged ArrayList and HashMap, lowercase @typeInfo tags, removed async/await and usingnamespace; plus gotchas found in production code."
+description: "Zig 0.17.1 patterns, checked against the released standard library (0.17.0 bugs that 0.17.1 fixes are marked, with workarounds). Use when writing, reviewing, or debugging Zig code for Zig 0.17.x (zig version / minimum_zig_version in build.zig.zon; a 0.16 project uses the zig skill instead), build.zig and build.zig.zon files, or comptime metaprogramming. Covers the 0.17 changes: array ** removed (@splat), errdefer capture and @cImport removed (translate-c package), @intFromEnum to @backingInt, struct-of-arrays @typeInfo (field_names, field_types), @bitCast on extern structs, @hasDecl pub-only, std.builtin to std.lang with .debug/.safe/.fast/.small, SafeAllocator and BufferFirstAllocator, Allocator.print and mem.print, mem.find, zon.parse with an arena, b.args to addPassthruArgs, custom build steps removed (host tool + Run step), array/vector @bitCast as logical little-endian bits, the per-byte lowering of wide @bitCast and readInt/writeInt(u128) (#36256) that makes std AES-GCM 2.6x slower, the 0.17.0 #37131 signed-to-narrower-unsigned @intCast/math.cast miscompile (fixed in 0.17.1), the configurer/maker build split with its cached configuration (undeclared configure-time reads go stale: dependOnDirectoryContents, poisonCache), optimize-mode spellings on the CLI, incremental builds with the self-hosted backend, and zig-pkg/. Also prevents older patterns from training data: the std.Io instance threaded through files, sockets, clocks and locks (std.fs to std.Io.Dir/File, std.net to std.Io.net, std.time timestamps and Timer to std.Io.Clock, std.Thread.Mutex/Condition/Pool to std.Io.Mutex/Condition/Group, std.crypto.random to io.randomSecure), main(init: std.process.Init), build system APIs (root_module, Compile methods to Module methods), buffered Reader/Writer with flush, removed async/await and usingnamespace; plus gotchas found in production code."
 license: MIT
 compatibility:
   - claude-code
   - opencode
   - codex
 metadata:
-  version: "0.17.0"
+  version: "0.17.1"
   language: "zig"
   category: "programming-language"
 ---
 
-# Zig Language Reference (v0.17.0)
+# Zig Language Reference (v0.17.1)
 
 Zig evolves rapidly. Training data contains outdated patterns that cause compilation errors. This skill documents breaking changes and correct modern patterns.
 
-**Version coverage:** 0.17.0 (current) with migration notes from 0.16, 0.15.x and 0.14.x.
+**Version coverage:** 0.17.1 (current; 0.17.0 differences are marked "0.17.0 only") with migration notes from 0.16, 0.15.x and 0.14.x.
 
 ## Design Principles
 
@@ -44,9 +44,11 @@ Larger cohesive files are idiomatic in Zig. Keep related code together — tests
 - Prefer `const` over `var` — immutability signals intent and enables optimizations
 - Prefer slices over raw pointers — bounds safety
 
-## Critical: Zig 0.17.0 Changes
+## Critical: Zig 0.17 Changes
 
-Everything below the 0.17 sections still describes 0.17.0 unless it is marked as old. Check
+Everything below the 0.17 sections still describes 0.17.1 unless it is marked as old. Statements
+"measured/run on 0.17.0" were taken before 0.17.1 and kept after reviewing the 0.17.0 → 0.17.1
+std diff. Check
 the project's toolchain first (`zig version`, `minimum_zig_version` in `build.zig.zon`): a
 0.16 project needs the 0.16 skill, not these spellings.
 
@@ -70,11 +72,89 @@ const v = void{};
 const v = {};       // i0 → u0
 ```
 
+Replacing `**` mechanically (all forms below compiled and ran on 0.17.0):
+- `[_]T{v} ** N` → `@as([N]T, @splat(v))`; where the result type is known (declaration with a
+  type, field, fixed-size parameter) plain `@splat(v)` is enough. Concatenation still works:
+  `@as([4]u8, @splat(1)) ++ [_]u8{9}`.
+- One repeated byte (`"x" ** 100`) needs no helper: `comptime &@as([100:0]u8, @splat('x'))` is a
+  `*const [100:0]u8` (sentinel kept, a valid `++` operand, coerces to `[]const u8`) that points
+  at a static constant, so a slice of it returned from a runtime scope does not dangle (probe in
+  Debug and ReleaseFast, with a stack clobber between the call and the read). At container level
+  drop the `comptime` (error: "redundant comptime keyword in already comptime scope").
+- String repetition (`"ab" ** 3`, `line ** n` with a comptime `line`) has no builtin: use a
+  comptime helper, and **declare it `inline fn`**. Assign the result from a `comptime` block and
+  return a pointer to that constant. Build it with `@splat` of rows plus a `@bitCast`, not with a
+  loop that copies into an array `var`: such a loop costs quadratic compile time (see
+  zig-gotchas.md, "A comptime loop that writes into an array `var` is quadratic"; the loop
+  version took 3.9 / 14.7 / 66 s of Sema for n = 10k / 20k / 40k copies of `"abc"`, this one
+  0.05 / 0.07 / 0.09 s, Zig 0.17.0; the same on 0.16.0, so this is old, the removal of `**` just
+  makes people write the loop). It needs no eval quota:
+  ```zig
+  inline fn strRepeat(comptime s: []const u8, comptime n: usize) *const [s.len * n:0]u8 {
+      const rep_result = comptime blk: {
+          const rows: [n][s.len]u8 = @splat(s[0..s.len].*);
+          const flat: [s.len * n]u8 = @bitCast(rows);
+          break :blk flat ++ [_:0]u8{};
+      };
+      return &rep_result;
+  }
+  ```
+  (Run on 0.17.0 in Debug, ReleaseSafe and ReleaseFast: `"x" ++ strRepeat("ab", 3) ++ "y"`
+  returned from a `noinline fn` and read after a stack clobber, the sentinel, `n = 0`, an empty
+  `s`, 1000 copies, and the `inline for (msgs)` shape below; also in ReleaseSafe on s390x under
+  qemu. The sentinel of uniform strings such as `strRepeat("a", 100)`, the case `b23c07e` fixed
+  for other comptime arrays, read through a `noinline` function: present on 0.17.0 and 0.17.1
+  in all three modes.)
+  Write it as `const r = comptime blk: { ...; break :blk f; }; return &r;`, not as
+  `comptime { ...; return &f; }`: the latter fails ("function called at runtime cannot return
+  value at comptime") when the helper is called from a runtime scope (probe-verified in a
+  migration codemod; the first form works from both).
+  **Without `inline` it is silently wrong.** A plain `fn` called from a runtime scope (a test
+  body, a function with a comptime parameter that is not itself evaluated at comptime) makes
+  `"x" ++ s ++ strRepeat("ab", 3) ++ "y"` a runtime concatenation into a stack temporary, and a
+  slice of it returned or stored dangles: no error, garbage bytes (found in a real module in
+  Debug and ReleaseFast; the minimal probe below reproduces it on 0.17.0 in ReleaseFast, and in
+  Debug only when the stack happens to be overwritten). Moving the helper's result into a
+  struct-decl static does not help; only `inline` makes the call's result comptime-known. The
+  same applies to any helper that returns `*const [N]u8` and is used as an operand of `++`.
+  The plain `fn` also has a loud symptom: `inline for (msgs)` over a local
+  `const msgs = [_][]const u8{ "", strRepeat("a", 100) }` fails with `unable to evaluate comptime
+  expression` / `types must be comptime-known` at the first use of `msg.len` as an array length
+  (the migration fixed it with `comptime` on the array declaration). With `inline fn` the same
+  code compiled with and without that `comptime` (ten probe shapes in Debug, two of them also in ReleaseSafe; the exact shape above in Debug, ReleaseSafe and ReleaseFast).
+  ```zig
+  noinline fn wrong() []const u8 { return "x" ++ strRepeatPlainFn("ab", 3) ++ "y"; } // WRONG: dangles
+  noinline fn right() []const u8 { return "x" ++ strRepeat("ab", 3) ++ "y"; }        // inline fn
+  // ReleaseFast: after any call that uses the stack, wrong() reads "\x00\x00..." and right()
+  // still reads "xabababy".
+  ```
+- A codemod that rewrites `** N` to `@as([N]u8, @splat(x))` is wrong for non-byte element types
+  (seen on an array of structs): grep the result for `\[[0-9]+\]u8, @splat\([a-z]` and check
+  each hit's real element type.
+- Multi-element arrays (`[_]T{ a, b } ** N`): the same shape without the sentinel,
+  `fn arrRepeat(comptime T: type, comptime unit: []const T, comptime n: usize) [unit.len * n]T`.
+  For integer or float elements use the `@splat`-rows-and-`@bitCast` body above; a
+  `@memcpy` loop with `@setEvalBranchQuota` works for any `T` but is quadratic in compile time,
+  so keep it for short results. (The `@splat` form was run on 0.17.0 with `u16` and `f32` units in
+  Debug and ReleaseFast, and on s390x under qemu.)
+- Watch for `@typeInfo(X).@"enum".fields.len` used as the length: it is now
+  `.field_names.len`, e.g. `var seen: [@typeInfo(E).@"enum".field_names.len]bool = @splat(false);`
+  (a mechanical rewrite that wraps `@splat(false)` in `@as([@typeInfo(E)]bool, …)` yields invalid code).
+
 `@cImport` is removed: translate C headers with the `translate-c` package
 (add it with `zig fetch --save` on a pinned ref — a release tag or commit of
 https://codeberg.org/ziglang/translate-c, not the moving default branch — then
-`@import("translate_c").Translator` in `build.zig`; `b.addTranslateC` is deprecated).
-Fetching needs the network: ask the user before adding the dependency.
+`@import("translate_c").Translator` in `build.zig`).
+Fetching needs the network: ask the user before adding the dependency. Without a dependency:
+`b.addTranslateC(.{ .root_source_file = b.path("src/c.h"), .target = target, .optimize = optimize })`
+still exists in the 0.17.0 std (`Build.zig`, `Build/Step/TranslateC.zig`; `link_libc` defaults to
+true; `.createModule()` gives the module to import) and the toolchain ships the translator
+(`lib/compiler/translate-c`). The release notes call it deprecated in favour of the package
+(more options, own release cadence); the std source carries no deprecation marker and the
+compiler stays silent about it. For a plain header with no extra options it is the route that needs
+no network. Compiled and run on 0.17.0 for this skill (a header with a `static inline` function
+and a `#define`, imported through `.createModule()`); a migration used it for `sqlite3.h`, where
+the first use compiled the translator (about a minute).
 `GlobalLinkage` lost `.internal` and `.link_once` (use `.weak`, or simply do not `@export`).
 
 ### Enum ↔ integer: `@backingInt` / `@fromBackingInt`
@@ -100,25 +180,138 @@ inline for (info.field_names, info.field_types, 0..) |name, FieldT, i| {
     use(name, FieldT, attrs);
 }
 ```
+Cheapest rewrite of an old loop body: keep the body and rebuild the old record per iteration,
+`inline for (info.field_names, info.field_types) |f_name, f_type| { const f = .{ .name = f_name, .type = f_type }; ... }`,
+or write one private `structFields(T)` shim that returns name/type/attrs and call it where
+`.fields` was (both used in migrations of cbor/yaml/protobuf/validation modules; compiled and
+tested there, not re-run for this skill).
+
 The same shape everywhere: enum `field_names`/`field_values`/`mode` (was `is_exhaustive`),
-fn `param_types`/`param_attrs`/`attrs.@"callconv"`/`attrs.varargs`, pointer
-`attrs.@"const"`/`@"align"`/`@"volatile"`/`@"allowzero"`/`@"addrspace"`, `decl_names` instead
-of `decls`, `error_set.error_names`. `std.meta.fields` is a compile error; `fieldNames`,
+fn `param_types`/`param_attrs`/`attrs.@"callconv"`/`attrs.varargs` (`param_types` elements are
+`?type`: `null` is an `anytype` parameter, so `Fn.params[i].type` becomes `param_types[i]` with the
+same optional type), pointer
+`attrs.@"const"`/`@"align"`/`@"volatile"`/`@"allowzero"`/`@"addrspace"`, `decl_names` (plain
+strings, so the `.name` of a declaration entry goes) instead of `decls`, `error_set.error_names`. `std.meta.fields` is a compile error; `fieldNames`,
 `fieldInfo`, `fieldTypes` are deprecated. `@Type` is gone (since 0.16): build types with `@Int`,
 `@Struct`, `@Union`, `@Enum`, `@Pointer`, `@Fn`, `@Tuple`.
 
 ### Silent changes (compile, behave differently)
 - **`@bitCast` reinterprets logical bits.** Arrays and vectors now behave as little-endian on
-  every target. A cast of an `extern struct`/`extern union` is a **compile error** — for type
-  punning use `@ptrCast` (`const p: *align(1) const u16 = @ptrCast(&bytes);`), an extern union,
-  or, for bytes into a C struct, `std.mem.bytesToValue(std.posix.sockaddr.in, bytes[0..@sizeOf(std.posix.sockaddr.in)])`.
-- **`@hasDecl` sees only `pub` declarations**, also from inside the same file.
+  every target. A cast of an `extern struct`/`extern union` — from it or to it — is a
+  **compile error**: for type punning use `@ptrCast` (`const p: *align(1) const u16 = @ptrCast(&bytes);`),
+  an extern union, or, for bytes into a C struct,
+  `std.mem.bytesToValue(sockaddr.in, bytes[0..@sizeOf(sockaddr.in)])` (a copy; `bytesAsValue`
+  gives a pointer), where `sockaddr` is `std.os.linux.sockaddr` in pure-Linux code without libc
+  (`std.posix.sockaddr` is libc's type when libc is linked, the Linux one otherwise).
+  A `[N]u8` ↔ integer `@bitCast` that meant "the bytes as they lie in memory" (a network-order
+  address in a `u32` field such as `sockaddr.in.addr`, a kernel-ABI word) now is a logical
+  little-endian cast and changes value on a big-endian target. The memory-order spelling,
+  same result as 0.16 on every target: `std.mem.bytesToValue(u32, &bytes)` /
+  `std.mem.toBytes(x)` (a `[4]u8` copy); when the byte order is a protocol fact rather than
+  "whatever memory has", `std.mem.readInt(u32, &bytes, .big)` / `std.mem.writeInt(u32, &bytes, x, .big)`.
+  Code that byte-swapped on big-endian *before* an array↔vector/integer `@bitCast` (to make the
+  cast see memory order) now swaps twice: remove the swap. Run-verified in a migration on
+  s390x under qemu (ReleaseSafe, module test suites): a ChaCha20-Poly1305 implementation passed
+  27 of 55 tests with the old big-endian swap and 49 of 55 after dropping it (the same count as
+  on 0.16), and a sealed-box module went from 3 failures to the 0.16 result (38 of 43) the same
+  way. The rule matches the language reference (earlier elements in less significant bits on
+  every target); a mips probe agreed. Test on a big-endian target, e.g. s390x under qemu.
+- **A word that must appear in big-endian order inside a `[N]u8`** (a TLS/AEAD nonce, a
+  sequence number in an AAD) is `@as([8]u8, @bitCast(@byteSwap(x)))` with an **unconditional**
+  swap: the array side of the cast is little-endian on every target, so a
+  *conditional* swap (swap only on a little-endian host) is right on one endianness and wrong on
+  the other, and a bare `@bitCast(x)` gives little-endian bytes everywhere. `std.crypto.tls.Client` does exactly this
+  (`crypto/tls/Client.zig:374,414,790,1103`: `pad ++ @as([8]u8, @bitCast(@byteSwap(seq)))`). Six
+  nonce sites in one migration needed this fix. `std.mem.writeInt(u64, &out, x, .big)` says the
+  same thing without the cast.
+  ```zig
+  // WRONG (0.17): conditional swap keyed on the host, or a bare cast of a "big()" helper
+  const be: [8]u8 = @bitCast(if (builtin.cpu.arch.endian() == .little) @byteSwap(x) else x);
+  // RIGHT: logical little-endian cast of the byte-swapped value, on every target
+  const be: [8]u8 = @bitCast(@byteSwap(x));
+  ```
+- **`@bitCast` of a `@Vector(n, bool)` to an integer: lane i is bit i on every target.** 0.16
+  big-endian code needed `@bitReverse` after it (a match-mask extraction); remove it. Checked at
+  comptime on x86_64 and mips-linux-musl with a negative control, and a mask-extraction routine
+  ran correctly on s390x under qemu (migration observations).
+- **A `@bitCast` between `[N]u8` (N > 8) and a type with a different element size is a
+  per-byte loop in 0.17, and above 64 bits LLVM cannot fold it back (open, see #36256).** It
+  hits `u128`/`u96`/`u192`/`u256`/`u48` ↔ bytes, so every `std.mem.readInt`/`writeInt` of those
+  widths (both endians), and `[4]u32`, `[2]u64`, `[8]u64`, `@Vector(4, u32)`, `@Vector(2, u64)`
+  ↔ bytes. ReleaseFast x86_64, instructions per function 0.16 → 0.17: `readInt(u128, p, .big)`
+  7 → 52, `writeInt(u128, …)` 6 → 62, `[16]u8` → `[4]u32` 6 → 75, `[64]u8` → `[16]u32` 9 → 168.
+  `readInt(u48)` (6 bytes) takes 23 instructions against 6 for `u64` (on 0.17.0 and 0.17.1). Not
+  hit: 8/16/32/64-bit integers, same-element-size casts (`[16]u8` ↔ `@Vector(16, u8)`, `[4]u32` ↔
+  `@Vector(4, u32)`), pointer casts. The std code pays too: `std.crypto.core.modes.ctr` writes
+  each counter with `writeInt(u128, …)` and GHASH uses `u128` casts, so on 0.17
+  `aes_gcm.Aes128Gcm` takes 2.6x and `onetimeauth.Ghash` 2.4x the cycles of 0.16 (16 KiB
+  messages), `base64.standard.Encoder` 1.33x; SHA-2 and BLAKE2 are unchanged. Workaround with
+  identical bytes: go through a pointer, which LLVM keeps as one load/store (for a byte array
+  to wider lanes, the `@Vector(N, u8)` route in zig-gotchas.md "byte array and wider lanes" also
+  works: `[16]u8` → `@Vector(16, u8)` → `@Vector(2, u64)` is 5 instructions on 0.17.0 and 0.17.1). Re-measured on
+  0.17.1: `readInt(u128)` 52, unchanged (#36256 is still open):
+  ```zig
+  // SLOW on 0.17 in a hot loop: ~60 instructions
+  std.mem.writeInt(u128, buf[0..16], ctr, .big);
+  // RIGHT: one byte swap + one unaligned store
+  @as(*align(1) u128, @ptrCast(buf[0..16])).* = std.mem.nativeToBig(u128, ctr);
+  const v = std.mem.bigToNative(u128, @as(*align(1) const u128, @ptrCast(buf[0..16])).*);
+  ```
+  Only worth it where the cast runs per block or per element; one conversion per operation costs
+  a few dozen instructions. To find every such cast with its call site, scan the Debug LLVM IR
+  (`zig test -ODebug -fllvm -fno-emit-bin -femit-llvm-ir=x.ll …`) for `zext i8 … to iN` /
+  `trunc iN … to i8` with N > 64 and follow each `!dbg` through its `inlinedAt` chain.
+- **0.17.0 only (fixed in 0.17.1): `@intCast` / `std.math.cast` from a signed integer to a
+  narrower *unsigned* one is miscompiled in optimized builds (#37131).** On 0.17.1 the shape
+  below returns 2 in every mode (run for this skill); a project that must still build with
+  0.17.0 needs the spelling below; one that drops it must refuse 0.17.0 with a comptime
+  `builtin.zig_version` check (`minimum_zig_version` is not enforced by Zig; recipe in
+  zig-gotchas.md). On 0.17.0 the
+  frontend emits LLVM `trunc nsw` (it should be `nuw`), so every value in the upper half of
+  the destination range (`0x8000_0000..0xFFFF_FFFF` for `u32`) is poison and LLVM may delete
+  any check that depends on it. Debug is unaffected, so the tests pass there. Whether an
+  optimized build exploits it depends on inlining and layout: the IR is `trunc nsw` in every
+  mode, and a test that does not fail proves nothing. Reproduced on 0.17.0 with
+  `noinline fn f(eb: i64) u32 { if (eb < 0 or eb > 0xFFFF_FFFF) return 1; const v: u32 = @intCast(eb); if (v > 0x7FFF_FFFF) return 2; return 0; }`
+  called with `eb = 0xFFFF_FFFF` passed through `std.mem.doNotOptimizeAway(&y)`: 2 in Debug,
+  0 in ReleaseSafe and ReleaseFast (a plain `var x: i64 = 0xFFFF_FFFF; _ = &x;` argument did not
+  fail; an `export fn` build shows the branch folded away in the optimized IR). A real case:
+  an SNMP anti-replay range check on a decoded engine-boots value was folded away.
+  **Keep the range check in every spelling:** `@intCast` of a negative `i64` to `u64` is
+  illegal behaviour (a panic in safe builds, a wrong value in ReleaseFast), so the cast to the
+  same-width unsigned type needs its own check. Safe spelling, checked in Debug, ReleaseSafe
+  and ReleaseFast: `const w = std.math.cast(u64, x) orelse return error.OutOfRange; const v = std.math.cast(u32, w) orelse return error.OutOfRange;`
+  (or `if (x < 0 or x > std.math.maxInt(u32)) return error.OutOfRange;` first, then
+  `const w: u64 = @intCast(x); const v: u32 = @intCast(w);`, or
+  `@truncate(@as(u64, @bitCast(x)))` after the same check). Unsigned to narrower unsigned,
+  and signed to narrower signed, are fine. Details, the cast-shape table and the places std
+  itself is hit: zig-gotchas.md.
+- **`@hasDecl` sees only `pub` declarations**, also from inside the same file. This also hits
+  option declarations a *consumer* supplies and a library probes (`@hasDecl(Root, "my_options")`,
+  optional methods on a user-supplied type): without `pub` the probe is silently `false` and
+  the library takes its default path. `rg '@hasDecl'` over the library lists the probes; make
+  the declarations the probe looks for `pub` in tests and docs (a non-`pub` method that is
+  then *called* is a compile error instead).
 - **`std.mem.containsAtLeastScalar(T, list, element, minimum)`** — `element` and `minimum`
   swapped places; old calls with an integer element still compile.
-- **`std.testing.allocator` is a `SafeAllocator`**, fresh for every test: it never reuses
-  memory (a test's RSS grows with what that test allocates, not its peak), checks writes after
+- **`std.testing.allocator` is a `SafeAllocator`**, fresh for every test: it hands a large
+  allocation and every emptied 8 KiB bucket back to `page_allocator`, so a loop of
+  alloc/free pairs stays flat (probe on 0.17.0, 2 000 000 x 64 B in one test: RSS 700 -> 708 KiB
+  in ReleaseSafe, 4524 -> 4584 KiB in Debug). Slots inside a bucket are never reused, though, so
+  long-lived small allocations interleaved with short-lived ones pin whole buckets (same probe,
+  1 in 64 kept: 195 KiB live, RSS 748 -> 14988 KiB). It checks writes after
   free in every mode, records allocation stack traces only in Debug, and a leak fails the test
-  in every mode, ReleaseFast included.
+  in every mode, ReleaseFast included. In a loop that runs thousands of seeds/iterations in one
+  test (fuzz and property drivers) giving each iteration its own allocator is still useful, for
+  leak attribution per iteration and to drop pinned buckets between iterations:
+  `var sa = std.heap.SafeAllocator.init(gpa, .{ .stack_trace_frames = 0 }); defer _ = sa.deinitLog(false);`
+  (`deinit()` returns the leak count and logs; `deinitLog(false)` is silent — `SafeAllocator.zig`
+  `init`/`deinit`/`deinitLog`), and turn a non-zero leak count into the iteration's failure.
+  `SafeAllocator` also resizes in place on `remap`, so a `std.testing.FailingAllocator` test
+  that pins `fail_index` can see fewer allocations than in 0.16 (seen in a migration: a
+  `fail_index = 2` was never reached because `toOwnedSlice` no longer allocated a second
+  time; `1` hit the intended allocation): re-derive the index from `alloc_index` of a clean
+  run instead of copying the old number.
 
 ### Renamed std
 | 0.16 | 0.17.0 |
@@ -126,7 +319,6 @@ of `decls`, `error_set.error_names`. `std.meta.fields` is a compile error; `fiel
 | `std.builtin` | `std.lang` (`std.builtin` is a deprecated alias) |
 | `std.builtin.OptimizeMode` `.Debug/.ReleaseSafe/.ReleaseFast/.ReleaseSmall` | `std.lang.Optimize` `.debug/.safe/.fast/.small` — `==` against the old names no longer compiles |
 | `std.debug.runtime_safety` | `@import("builtin").mode.runtimeSafety()` |
-| `@import("builtin").cpu` / `.os` / `.abi` / `.object_format` | `@import("builtin").target.cpu` / `.os` / `.abi` / `.ofmt` |
 | `std.heap.DebugAllocator`, `GeneralPurposeAllocator` | `std.heap.SafeAllocator` (`.init(backing, .{})`, `deinit()` returns the leak count) |
 | `std.heap.stackFallback(n, gpa)` | `std.heap.BufferFirstAllocator.init(&buf, gpa)` |
 | `std.fmt.allocPrint(a, f, args)` | `a.print(f, args)` |
@@ -134,16 +326,49 @@ of `decls`, `error_set.error_names`. `std.meta.fields` is a compile error; `fiel
 | `std.mem.indexOf*`, `lastIndexOf*` | `std.mem.find*`, `findLast`, `findScalarLast` |
 | `std.fs.path`, `std.fs.max_path_bytes` | `std.Io.Dir.path`, `std.Io.Dir.max_path_bytes` |
 | `list.getLast()` / `getLastOrNull()` | `list.last().?` / `list.last()`; new `lastPtr()` |
-| `std.bit_set.IntegerBitSet`/`ArrayBitSet`/`StaticBitSet`/`DynamicBitSetUnmanaged` | `Integer`/`Array`/`Static`/`Dynamic`; `.initEmpty()`/`.initFull()` → `.empty`/`.full` |
+| `std.bit_set.IntegerBitSet`/`ArrayBitSet`/`StaticBitSet`/`DynamicBitSetUnmanaged` | `Integer`/`Array`/`Static`/`Dynamic`; `.initEmpty()`/`.initFull()` → `.empty`/`.full` (also `std.EnumSet`; `Dynamic.initEmpty(gpa, n)` is unchanged) |
 | `std.ArrayListUnmanaged`, `std.AutoArrayHashMapUnmanaged` | `std.ArrayList`, `std.array_hash_map.Auto` |
 | `std.zon.parse.fromSliceAlloc(T, gpa, src, &diag, .{})` + `free` | `std.zon.parse.fromSlice(T, .{ .gpa, .arena, .source, .diagnostics })` — result lives in the arena |
 | `uri.getHost(&buf)` | `std.Io.net.HostName.fromUri(uri, &buf)` (validates RFC 1123) |
 | `std.tar.pipeToFileSystem` | `std.tar.extract` |
 | `std.gpu` | `std.spirv` |
 
+**Not moved** (probed on 0.17.0, a common wrong assumption): `@import("builtin").cpu`, `.os`,
+`.abi` and `.object_format` still exist next to `.target.cpu` / `.target.os` / `.target.abi` /
+`.target.ofmt`, and `@typeInfo(fn).@"fn".return_type` is unchanged. Only the enum members of
+`builtin.mode` changed (`.Debug` → `.debug`); a bulk search-and-replace of `builtin.cpu`/`builtin.os`
+is wasted work.
+
+Removed or changed without a rename in the table above (each checked in the 0.17.0 std):
+
+| 0.16 | 0.17.0 |
+|---|---|
+| `std.ascii.indexOfIgnoreCase`, `indexOfIgnoreCasePos`, `indexOfIgnoreCasePosLinear` | `findIgnoreCase`, `findIgnoreCasePos`, `findIgnoreCasePosLinear` (`ascii.zig`). Removed outright, not deprecated: a compile error, although the `std.mem.indexOf*` names still compile as deprecated aliases |
+| `std.fmt.bufPrintZ(buf, f, args)` | `std.mem.printSentinel(buf, f, args, 0)` (`std.fmt.bufPrintSentinel` still exists but is deprecated) |
+| `allocator.dupeZ(u8, s)` | `allocator.dupeSentinel(u8, s, 0)` (`mem/Allocator.zig` `dupeSentinel`) |
+| `std.meta.Int(.unsigned, n)` | builtin `@Int(.unsigned, n)` |
+| `std.meta.fields(T)` | compile error: `@typeInfo(T)` (`field_names`, `field_types`, …) |
+| `std.meta.fieldNames(T)` | deprecated; returns a slice `[]const [:0]const u8` (not an array), so `a ++ b` of two results needs `comptime`; prefer `@typeInfo(T).@"struct".field_names` |
+| `std.meta.declarations(T)` (items with `.name`) | returns the names themselves, `[]const [:0]const u8` |
+| `std.builtin.Type.StructField.Attributes` | `std.lang.Type.Struct.FieldAttributes` (`Union.FieldAttributes` likewise) |
+| `@typeInfo(E).error_set` (`?[]const Error`, `.name` per error) | `.error_set.error_names`: `?[]const [:0]const u8`, plain strings |
+| `os.linux.wait4`/`waitpid(pid, status: *u32, …)` | `status: *i32` — keep a `u32` field and `@bitCast` at the call boundary |
+| `std.os.linux.SYS.fstatat64` on x86_64 (`.X64`) | `.newfstatat` (262, `os/linux/syscalls.zig`); the name differs per architecture (e.g. arm/x86 `fstatat64`, aarch64/riscv64 `newfstatat`) — code that spans targets selects with `@hasField(std.os.linux.SYS, "newfstatat")` |
+| `std.elf.Elf64_Phdr` (`p_type`, `p_offset`, `p_vaddr`, …) | `std.elf.Elf64.Phdr` / `std.elf.ElfN.Phdr` with unprefixed fields `type` (enum `std.elf.PT`: `switch (ph.type) { .LOAD, .DYNAMIC => … }`), `offset`, `vaddr`, `paddr`, `filesz`, `memsz`, `flags`, `align`; `std.elf.AT.SYSINFO_EHDR` |
+| `Io.VTable.netRead` / `netSend` / `netWrite` | one `vtable.operate(userdata, Operation)`; a test double that wraps a real `Io` overrides `operate`, switches on `.net_read` (`operate` also carries `.net_send` and `.net_write`, `Io.zig` `Operation`), and forwards the rest. `netClose` now takes `[]const net.Socket` (`Io.zig` VTable). `NetRead.Error` has `ConnectionTimedOut` and no `Timeout`: a fake `Io` that maps its own `Timeout` must rename it. A wrapper that builds its vtable by copying a base and overriding every entry whose *name* matches a declaration of its own keeps compiling when std folds an entry away, and the override is then never installed: socket reads and writes silently go to the base backend (seen in a uring `Io` after the fold). Make an unmatched override name a compile error (std-io.md, "Wrapping an Io") |
+
 `std.ArrayList` gained a `pointer_stability` field (a debug lock behind `lockPointers()` /
 `unlockPointers()`): a hand-written literal `.{ .items = &.{}, .capacity = 0 }` no longer
 compiles — use `.empty` or `.initBuffer(&buf)`.
+
+Deprecated names still compile silently (the compiler prints nothing about them), and neither `zig build`, `zig test` nor any
+flag lists them (`--help` of both checked). To find them in a project, grep for the left column
+of the tables above and for the names the deprecation bullets mention, e.g.
+`rg -n 'indexOf|lastIndexOf|allocPrint|bufPrint|ArrayListUnmanaged|std\.builtin|DebugAllocator|\.getLast|@intFromEnum|@enumFromInt' src build.zig`
+(a suggestion built from the table — extend it). `zig fmt` 0.17 rewrites `@intFromEnum(x)` to
+`@backingInt(x)` and `@enumFromInt(x)` to `@fromBackingInt(@intCast(x))` in every file it
+formats (checked on a probe file): format only the files you mean to change, or expect a diff
+in every file that contains them (and, in a repository that pins source digests, new digests).
 
 ### Build system
 ```zig
@@ -155,7 +380,12 @@ run_cmd.addPassthruArgs();   // forwards `zig build run -- a b c`
 - `zig build` runs `build.zig` in a separate *configurer* process; a cached *maker* executes the
   graph. The first `zig build` after installing Zig compiles the maker (measured twice: 108 s
   and 115 s; Zig 0.17.0, x86_64 Linux, 8-core machine; once per toolchain and global cache — keep
-  `ZIG_GLOBAL_CACHE_DIR` cached in CI). Later runs skip `build.zig` entirely when the
+  `ZIG_GLOBAL_CACHE_DIR` cached in CI; on a developer machine the global cache usually already
+  holds the maker from another 0.17 project: a first build of a small project (~4.3k
+  lines, Zig 0.17.0, x86_64 Linux) took 5.7 s in total; maker already in the global cache). A script that gives each lane its own
+  `ZIG_GLOBAL_CACHE_DIR` pays the maker once per lane. (One exception where separate caches
+  help: while 0.16 and 0.17 both fetch packages, see the zig-gotchas.md note on a shared
+  global cache.) Later runs skip `build.zig` entirely when the
   configuration key is unchanged (`zig build --help` then took 15 ms, same machine).
 - **The configuration is cached, and only declared inputs invalidate it.** The key is the
   `-D`/CLI options, the target and the `build.zig` sources. A `build.zig` that reads a
@@ -174,7 +404,51 @@ run_cmd.addPassthruArgs();   // forwards `zig build run -- a b c`
   be the first argument), `--build-runner`, `--verbose-llvm-bc`. New: `--print-configuration`,
   `--cache-poison`, `--listen=-`. `b.cache_root` and `b.graph.global_cache_root` no longer
   exist; a step that needs the local cache directory gets `std.Build.LazyPath.cache_root`.
-- `b.build_root` → `b.root` (a `Cache.Path`); `LazyPath.getDisplayName()` → `"{f}"`.
+- `b.build_root` → `b.root` (a `Cache.Path`): use its methods, `b.root.access(io, sub, .{})`,
+  `b.root.openDir(io, sub, .{})`, `b.root.openFile(...)` (they join `p.sub_path` themselves).
+  `b.root.joinString(gpa, sub)` returns a path that already includes `root_dir`, so passing it
+  to `b.root.root_dir.handle` doubles the prefix (`Cache/Path.zig` `joinString` vs `openDir`).
+  `LazyPath.getDisplayName()` → `"{f}"`.
+  `Cache.Path` has no `readFileAlloc`: a 0.16 `b.build_root.handle.readFileAlloc(io, sub, …)`
+  becomes "declare, then read the joined path from `cwd()`" (checked on 0.17.0; editing the
+  file reran the configuration):
+  ```zig
+  b.dependOnFileContents(b.path(sub));
+  const full = try b.root.joinString(b.allocator, sub);
+  const text = try std.Io.Dir.cwd().readFileAlloc(b.graph.io, full, b.allocator, .limited(1 << 20));
+  ```
+- `b.dupe(s)` returns `[]const u8` (0.16: `[]u8`): to modify the copy in place
+  (`std.mem.replaceScalar`, …) use `b.allocator.dupe(u8, s)`.
+- **Custom build steps are gone.** `Step.makeFn`/`Step.init` with a user function no longer
+  exist: a `Step` carries a `tag` from the closed `Configuration.Step.Tag` set (`compile`, `run`,
+  `fmt`, `write_file`, `check_file`, `options`, …), because the maker executes a serialized
+  graph and never calls back into `build.zig`. Anything that was a `makeFn` (repository
+  checks, generators, file-walking gates) becomes a **host executable plus a Run step**:
+  ```zig
+  const gates = b.addExecutable(.{ .name = "gates", .root_module = b.createModule(.{
+      .root_source_file = b.path("scripts/gates.zig"),
+      .target = b.graph.host,
+      .optimize = .safe,
+  }) });
+  const run = b.addRunArtifact(gates);
+  run.addArg("check-changelog");
+  run.addPrefixedFileArg("--zig=", b.graph.path(.zig_exe, ""));   // what old code read from `b`
+  run.has_side_effects = true;            // never cached: it reads the tree, not declared inputs
+  run.setCwd(b.path("."));                // the old make fn ran with the package root as cwd
+  b.step("check-changelog", "…").dependOn(&run.step);
+  ```
+  The tool does all file reads at make time (so they need no `dependOn…Contents`). Data the
+  old make fns shared with `build.zig` (module lists, tables) is reachable by making the tool
+  import `build.zig` itself as a module (`root_module.addAnonymousImport("build_zig", .{ .root_source_file = b.path("build.zig") })`
+  and mark the shared declarations `pub`). A step option like `-Dmodule=x` is forwarded to the
+  tool as an argument (`--module=x`). Pass what the old code took from `b` (the `zig` binary,
+  the cache directory) as arguments: `b.graph.path(.zig_exe, "")` / `b.graph.path(.local_cache, "")`
+  (compiled and run on 0.17.0: the tool receives `--zig=/path/to/zig`, `--cache-dir=./.zig-cache`).
+  A child `zig build` started by the tool takes the global cache from `ZIG_GLOBAL_CACHE_DIR`.
+- `dependOnDirectoryContents`/`dependOnFileContents` on a path that does not exist fails the
+  configuration (`error: configuration failed: FileSystemFailure`, checked): declare the nearest
+  existing ancestor directory instead — an added entry then still reruns the configuration —
+  and, since the form is not recursive, one declaration per directory you scan.
 - Run step args: `addOutputFileArg(name)` → `addOutputFileArg2(name, .{})`, and the same `*Arg2(…,
   .{ .prefix = … })` scheme for artifact, file, directory, output-directory and dep-file args.
 - Fmt step `paths`/`exclude_paths` take `b.pathList(&.{ "src", "build.zig" })`.
@@ -187,7 +461,8 @@ run_cmd.addPassthruArgs();   // forwards `zig build run -- a b c`
 - Fetched packages land in `zig-pkg/` in the project (add it to `.gitignore`); `--pkg-path` /
   `ZIG_LOCAL_PKG_DIR` move it; `zig build --fork=<path>` overrides a dependency for one build.
 - Overriding the build runner is gone (`--build-runner`); IDEs use `zig build --listen=-`
-  (Build Server Protocol). **ZLS does not work with 0.17.0** — expect no editor diagnostics.
+  (Build Server Protocol). Use ZLS 0.17.0 (released 2026-10-19); some of its build.zig
+  integration regressed (see Tooling > ZLS).
 
 ### Optimize modes and backends
 - **Both spellings work in 0.17, only the old ones in 0.16:** `-OReleaseSafe` / `-Osafe` for
@@ -204,27 +479,90 @@ run_cmd.addPassthruArgs();   // forwards `zig build run -- a b c`
   ("unrecognized parameter", measured).
 
 ### Moving a 0.16 project
-1. Pin the toolchain (`minimum_zig_version = "0.17.0"`, CI) and cache the global cache in CI.
+1. Pin the toolchain (`minimum_zig_version = "0.17.1"`, CI) and cache the global cache in CI.
+   Tell the user before they switch their toolchain that the editor needs ZLS 0.17.0 too, and
+   that some imports may not resolve in it (see Tooling > ZLS); `zig build` stays the
+   authoritative error source.
+   **Check every dependency for a 0.17 line before touching your own code**: compare the
+   `build.zig.zon` pin with the upstream's branches and `master`; a dependency whose
+   `build.zig` does not configure on 0.17 stops the migration at its first step. Seen in one
+   migration: a SQLite wrapper package had no 0.17 line at all, a PostgreSQL client had one only
+   on `master` (read the diff before moving the pin). A wrapper around a C library can usually
+   be replaced by the C source itself: pin the upstream archive (here the SQLite amalgamation),
+   compile it in your own `build.zig` and translate its header with `b.addTranslateC` (see
+   "@cImport is removed" above). From that migration (builds and passes its tests on 0.17.0):
+   ```zig
+   // build.zig.zon: .sqlite = .{ .url = "https://www.sqlite.org/2025/sqlite-amalgamation-3490200.zip", .hash = … } (the hash `zig fetch --save` prints)
+   const amalgamation = b.dependency("sqlite", .{}).path(""); // a plain archive, no build.zig
+   const header = b.addTranslateC(.{               // translate the archive's header, never a system one
+       .root_source_file = amalgamation.path(b, "sqlite3.h"),
+       .target = target,
+       .optimize = optimize,
+   });
+   const lib = b.addLibrary(.{ .name = "sqlite", .linkage = .static, .root_module = b.createModule(.{
+       .target = target, .optimize = optimize, .link_libc = true,
+   }) });
+   lib.root_module.addCSourceFile(.{ .file = amalgamation.path(b, "sqlite3.c"), .flags = &.{"-std=c99"} });
+   mod.addImport("sqlite3", header.createModule()); // mod: the Zig module calling the C API (link_libc = true)
+   mod.linkLibrary(lib);
+   ```
 2. Parse first: `zig ast-check` every file — array `**`, `errdefer |e|`, `void{}`, `@cImport`
    stop at the parser.
 3. `zig fmt` rewrites `@intFromEnum`/`@enumFromInt`; the rest is by hand: struct-of-arrays
-   `@typeInfo`, `@bitCast` into extern structs, optimize-mode comparisons in `build.zig`,
-   `b.args`, `b.build_root`, configure-time I/O (declare it), bit_set and zon renames.
+   `@typeInfo`, `@bitCast` into extern structs, optimize-mode comparisons (`builtin.mode ==
+   .Debug` → `.debug`; `builtin.cpu`/`.os` need no change), `b.args`, `b.build_root`, custom
+   build steps (host tool + Run step), configure-time I/O (declare it), bit_set and zon renames.
 4. Audit what still compiles: every `@bitCast` of an array/vector, every `@hasDecl` on a
-   private declaration, `containsAtLeastScalar` calls.
-5. Re-measure: constant-time checks and benchmarks (LLVM 22).
+   private declaration, `containsAtLeastScalar` calls. Deprecated names compile silently and
+   no flag lists them: grep for the left column of the "Renamed std" table (a codemod for the
+   common ones is below). A `@bitCast`
+   between `[N]u8` and an integer that meant "the bytes as they lie in memory" is now a
+   logical little-endian cast; replace it by `std.mem.bytesToValue`/`toBytes` (or
+   `readInt`/`writeInt` with an explicit endianness) — see "Silent changes".
+   Move to 0.17.1, not 0.17.0: 0.17.0 miscompiles every signed-to-narrower-unsigned
+   `@intCast`/`std.math.cast` in optimized builds (see "Silent changes", #37131), and the tests
+   pass in Debug. Set `.minimum_zig_version = "0.17.1"` (advisory only; a library that relies on
+   0.17.1 adds the comptime version check from zig-gotchas.md). Run the suite in an optimized mode too.
+   A hot `[N]u8` <-> wider-lane vector or >= 16-byte integer `@bitCast` (not `[4]u8`<->`u32` / `[8]u8`<->`u64`, a single load) also became a byte loop: route it through
+   `@Vector(N, u8)` (see zig-gotchas.md, "byte array and wider lanes").
+5. Re-measure: constant-time checks and benchmarks (LLVM 22); anything that pins source text
+   or a compiler-output digest (ctgrind contexts, hashes of sources) needs regenerating after
+   any source change, including the `zig fmt` rewrites. Do not leave the self-hosted backend in
+   a test, valgrind or fuzz lane.
 
 Can land on 0.16 first, working on both: `**` → `@splat`, `@bitCast` into extern structs →
-`@ptrCast`/`bytesToValue`, dropping `std.meta.fields`, `ArrayList` literals → `.empty`. Not
+`@ptrCast`/`bytesToValue`, array `@bitCast` for memory order → `bytesToValue`/`readInt`,
+dropping `std.meta.fields`, `ArrayList` literals → `.empty`. Not
 before the switch: removing `try` from `X25519.KeyPair.generateDeterministic` (0.16 still
 returns an error union).
+
+Mechanical rewrite of the deprecated-call churn (a migration had about 300 sites, 146 of them
+`allocPrint`); the regexes were applied with `sed -E` and each result was checked by a build and
+the tests, and the patterns were re-run here on a sample file (every line rewritten as shown):
+```bash
+# \b is GNU sed (BSD/macOS sed needs another word-boundary spelling). The `fmt.bufPrint ->
+# mem.print` rule needs a name `mem` in scope: in a file that only has `const fmt = std.fmt;`
+# the result fails to compile, loudly; add `const mem = std.mem;` there.
+# allocPrint: the first argument is an identifier, a field access or a no-arg call
+s/std\.fmt\.allocPrint\(([A-Za-z_][A-Za-z0-9_.]*(\(\))?),[ ]?/\1.print(/g
+s/\bfmt\.bufPrint\(/mem.print(/g
+# anchor the mem renames on the `mem.` prefix so a project's own `indexOf` stays alone;
+# note findScalarLast, not findLastScalar
+s/\bmem\.lastIndexOfScalar\(/mem.findScalarLast(/g
+s/\bmem\.lastIndexOf(Any|None|Linear)?\(/mem.findLast\1(/g
+s/\bmem\.indexOf(Scalar|ScalarPos|Any|AnyPos|Pos|None|NonePos|PosLinear)?\(/mem.find\1(/g
+```
+Grep for `allocPrint|bufPrint|indexOf` afterwards for what the patterns miss (`indexOfDiff`,
+`indexOfSentinel`, `indexOfMin`... also became `find*`; check each new name exists in `mem.zig`). `dupeZ(u8, X)` → `dupeSentinel(u8, X, 0)`
+by a `[^)]*` regex breaks a call whose `X` contains a call (`map.get("A") orelse "b"` puts the
+`, 0` inside `get(...)`): it fails to compile, loudly; fix those by hand.
 
 ### Incremental compilation
 `zig build -fincremental --watch` rebuilds on every save — but only the **self-hosted**
 backend compiles incrementally. Measured on a 10-line program in Debug (Zig 0.17.0, x86_64 Linux, 8-core machine):
 self-hosted 479 ms for the first build, then 14 ms and 6 ms per edit; with `.use_llvm = true`
 every edit was a full 2–3 s rebuild.
-For the edit loop (and while ZLS does not work) run it with the self-hosted backend, e.g.
+For the edit loop (and where ZLS does not resolve an import) run it with the self-hosted backend, e.g.
 `zig build -fincremental --watch -Dselfhosted=true` when the build exposes such an option;
 test with LLVM. There is no incremental mode without `--watch`.
 
@@ -302,7 +640,9 @@ pub fn main(init: std.process.Init) !void {
     _ = io;
 }
 // Elsewhere (a library test harness, a C entry point) create one and thread it through:
-var threaded: std.Io.Threaded = .init(gpa, .{}); // init takes (gpa, options)
+// init takes (gpa, options). Without `.environ = init.minimal.environ` in the options,
+// child processes started through this Io get an EMPTY environment; in main use init.io.
+var threaded: std.Io.Threaded = .init(gpa, .{});
 defer threaded.deinit();
 const io = threaded.io();
 ```
@@ -333,7 +673,7 @@ defer conn.close(io);
 // (`.link_libc = true`), std.c.close/write/socket/connect are the fallback.
 ```
 
-See **[std.net reference](references/std-net.md)** for complete networking documentation.
+See **[std.net reference](references/std-net.md)** for the std.net → std.Io.net migration and stream I/O.
 
 ## Critical: Time APIs Removed (0.16)
 
@@ -491,7 +831,7 @@ const stdout = std.io.getStdOut().writer();
 try stdout.print("Hello\n", .{});
 
 // CORRECT - new API: provide buffer, access .interface, flush
-// `io` comes from an `Io` implementation (e.g. `std.Io.Threaded.init(gpa, .{}).io()`)
+// `io` comes from an `Io` implementation (e.g. create `var threaded: std.Io.Threaded = .init(gpa, .{})` and `threaded.io()` as in the Io section above; in an executable use `init.io`, a bare `.init(gpa, .{})` starts children with an empty environment)
 var buf: [4096]u8 = undefined;
 var stdout_writer = std.Io.File.stdout().writer(io, &buf);
 const stdout = &stdout_writer.interface;
@@ -697,6 +1037,29 @@ Neither `.{}` nor a hand-written field literal initializes an `ArrayList`: 0.17 
   `DebugAllocator` is deprecated). In `main(init: std.process.Init)` use `init.gpa`: a `SafeAllocator` in Debug/ReleaseSafe
   (and in ReleaseFast/Small when single-threaded without libc); otherwise `c_allocator` when
   linking libc, `wasm_allocator` on wasm, `smp_allocator` elsewhere (`std/start.zig`).
+  `init.io` is an `Io.Threaded` that `start.zig` builds on that same `gpa`
+  (`.init(gpa, .{ .argv0 = .init(.{ .vector = args }), .environ = .{ .block = environ } })`), so a program
+  that replaces `init.gpa` (to leave `smp_allocator`) keeps every allocation inside `Io` on the
+  old one. Replace both: build your own `std.Io.Threaded` on the new allocator, pass
+  `.argv0 = .init(.{ .vector = init.minimal.args.vector })` and
+  `.environ = init.minimal.environ`; without `.environ` the `Io` starts children with an empty
+  environment. A soak run in one project: `smp_allocator` +5.4 MB/min, only `init.gpa` swapped
+  +0.7 MB/min, `init.gpa` and `init.io` swapped flat (not re-run for this skill; the
+  `start.zig` lines are read from the source).
+- **`SafeAllocator` over `std.heap.page_allocator` can serve as the GPA of a long-running
+  daemon, not only for tests; measure RSS on your own workload first.** Its header says "Given
+  the backing allocator does not reuse memory, this does not reuse memory either"; that is a
+  statement about the *backing*: `free` hands memory back to the backing (`SafeAllocator.zig`
+  `free`, `rawFree` calls), and `page_allocator` returns pages to the OS. Measured in a
+  migration (host build, ReleaseSafe, 200 000 MQTT connect/publish/leave cycles): RSS flat at
+  28.2-28.3 MB for `SafeAllocator` and for the old `DebugAllocator`, while an `ArenaAllocator`
+  negative control grew 9.3 kB per cycle; not re-run for this skill. **Caveat:** small
+  allocations live in linearly filled 8 KiB buckets (`SafeAllocator.zig` `bucket_size_log2`)
+  and a bucket goes back to the backing only when every allocation in it is freed; slots inside
+  a bucket are not reused. One long-lived small object pins its whole bucket, so a daemon that
+  mixes long-lived small objects with per-request garbage can grow where the MQTT churn stayed
+  flat (probe on 0.17.0, 200 000 x 64 B with 1 in 64 kept alive, 195 KiB live: RSS 748 ->
+  14988 KiB in ReleaseSafe, 4596 -> 29716 KiB in Debug).
 
 ### Linked Lists: Generic Parameter Removed
 ```zig
@@ -792,7 +1155,7 @@ if (@typeInfo(T) == .int) { ... }
 if (@typeInfo(T) == .bool) { ... }
 if (@typeInfo(T) == .pointer) { ... }
 
-// Accessing fields (0.17: struct-of-arrays, see "Zig 0.17.0 Changes"):
+// Accessing fields (0.17: struct-of-arrays, see "Zig 0.17 Changes"):
 const names = @typeInfo(T).@"struct".field_names;
 const types = @typeInfo(T).@"struct".field_types;
 const tag_type = @typeInfo(T).@"enum".tag_type;
@@ -868,6 +1231,7 @@ var server = std.http.Server.init(
 | `no field 'close' in 'posix'` | `std.posix.close` removed (0.16): close through the owning `Io` type (`file.close(io)`, `stream.close(io)`); a raw fd with libc linked: `_ = std.c.close(fd)` |
 | `use of undefined value` | Arithmetic on `undefined` is now illegal — initialize explicitly |
 | `type 'f32' cannot represent integer` | Use float literal: `123_456_789.0` not `123_456_789` |
+| `ambiguous reference` (note: `also declared here`) | a declaration inside a struct has the same name as a file-level or outer declaration the struct body also refers to; rename one (seen on 0.17.0 after a migration added a decl whose name an outer one already had) |
 | `ambiguous format string` | Use `{f}` for format methods |
 | `no field 'append'` on ArrayList | Pass allocator: `list.append(allocator, val)` (unmanaged default) |
 | `expected 2 arguments, found 1` on ArrayList | Add allocator param: `.append(allocator, val)`, `.deinit(allocator)` |
@@ -884,12 +1248,19 @@ var server = std.http.Server.init(
 | `invalid builtin function: '@cImport'` | Removed (0.17): `translate-c` package, `Translator.init` in build.zig |
 | `no field named 'fields' in struct 'lang.Type.Struct'` | SoA type info (0.17): `field_names`, `field_types`, `field_attrs` |
 | `cannot @bitCast from '<extern struct>'` | 0.17: `@ptrCast` to `*align(1) const T`, or an extern union |
+| `cannot @bitCast to '<extern struct>'` (bytes into a C struct, e.g. `os.linux.sockaddr.in`) | 0.17: `std.mem.bytesToValue(T, bytes[0..@sizeOf(T)])` (copy) or `std.mem.bytesAsValue` (pointer) |
+| `struct 'fmt' has no member named 'bufPrintZ'` | 0.17: `std.mem.printSentinel(buf, fmt, args, 0)` |
+| `no field or member function named 'dupeZ' in 'mem.Allocator'` | 0.17: `allocator.dupeSentinel(u8, s, 0)` |
+| `struct 'meta' has no member named 'Int'` | 0.17: builtin `@Int(.unsigned, n)` |
+| `deprecated in favor of @typeInfo` at `std.meta.fields` | 0.17: `@typeInfo(T).@"struct".field_names` / `field_types` |
+| `error: configuration failed: FileSystemFailure` | 0.17: `dependOn…Contents` on a path that does not exist — declare the nearest existing ancestor |
 | `no field named 'args' in struct 'Build'` | 0.17: `run_cmd.addPassthruArgs()` |
 | `no field named 'build_root' in struct 'Build'` | 0.17: `b.root` (a `Cache.Path`) |
+| `expected type '[]u8', found '[]const u8'` on `b.dupe(...)` | 0.17: `b.dupe` returns `[]const u8`; a mutable copy is `b.allocator.dupe(u8, s)` |
 | `no field named 'ReleaseFast' in enum 'lang.Optimize'` | 0.17: `.debug`, `.safe`, `.fast`, `.small` |
 | `'zon.parse' has no member named 'fromSliceAlloc'` | 0.17: `std.zon.parse.fromSlice(T, .{ .gpa, .arena, .source, .diagnostics })` |
 | `missing struct field: pointer_stability` | 0.17 ArrayList: initialize with `.empty`, not a field literal |
-| `expected error union type, found '...X25519.KeyPair'` | 0.17: it no longer fails — drop the `try` |
+| `expected error union type, found '...X25519.KeyPair'` | 0.17: it no longer fails — drop the `try` (`X25519.recoverPublicKey` likewise returns a plain `[32]u8`: `crypto/25519/x25519.zig:35,65`). Generic code over several DH types that still `try`s a call that may now be infallible: `try @as(anyerror!KeyPair, KP.generateDeterministic(seed))` |
 
 ## Verification Workflow
 
@@ -939,7 +1310,7 @@ Load these references when working with core language features:
 
 ### Language Basics & Built-ins
 - **[Language Basics](references/language.md)** - Core language: types, control flow (if/while/for/switch), error handling (try/catch/errdefer), optionals, structs, enums, unions, pointers, slices, comptime, functions
-- **[Built-in Functions](references/builtins.md)** - All `@` built-ins: type casts (@intCast, @bitCast, @ptrCast), arithmetic (@addWithOverflow, @divExact), bit ops (@clz, @popCount), memory (@memcpy, @sizeOf), atomics (@atomicRmw, @cmpxchgWeak), introspection (@typeInfo, @TypeOf, @hasDecl), SIMD (@Vector, @splat, @reduce), C interop (@cImport, @export)
+- **[Built-in Functions](references/builtins.md)** - All `@` built-ins: type casts (@intCast, @bitCast, @ptrCast), arithmetic (@addWithOverflow, @divExact), bit ops (@clz, @popCount), memory (@memcpy, @sizeOf), atomics (@atomicRmw, @cmpxchgWeak), introspection (@typeInfo, @TypeOf, @hasDecl), SIMD (@Vector, @splat, @reduce), exports (@export; @cImport is removed in 0.17, see the translate-c package)
 
 ## Standard Library References
 
@@ -963,7 +1334,7 @@ Load these references when working with specific modules:
 - **[std.simd](references/std-simd.md)** - SIMD vector utilities: optimal vector length, iota/repeat/join/interlace patterns, element shifting/rotation, parallel searching, prefix scans, branchless selection
 
 ### Time & Timing
-- **[std.time](references/std-time.md)** - Wall-clock timestamps, monotonic Instant/Timer, epoch conversions, calendar utilities (year/month/day), time unit constants
+- **[std.time](references/std-time.md)** - Io.Clock timestamps and durations (Instant/Timer are gone), epoch conversions, calendar utilities (year/month/day), time unit constants
 - **[std.Tz](references/std-tz.md)** - TZif timezone database parsing (RFC 8536), UTC offsets, DST rules, timezone abbreviations, leap seconds
 
 ### Sorting & Searching
@@ -974,7 +1345,7 @@ Load these references when working with specific modules:
 - **[std.HashMap / AutoHashMap](references/std-hashmap.md)** - Hash maps, string maps, ordered maps
 - **[std.ArrayHashMap](references/std-array-hash-map.md)** - Insertion-order preserving hash map, array-style key/value access
 - **[std.MultiArrayList](references/std-multi-array-list.md)** - Struct-of-arrays for cache-efficient struct storage
-- **[std.SegmentedList](references/std-segmented-list.md)** - Stable pointers, arena-friendly, non-copyable types
+- **[std.SegmentedList](references/std-segmented-list.md)** - Removed in 0.16 (historical technique page): stable pointers, arena-friendly, non-copyable types
 - **[std.DoublyLinkedList / SinglyLinkedList](references/std-linked-list.md)** - Intrusive linked lists, O(1) insert/remove
 - **[std.PriorityQueue](references/std-priority-queue.md)** - Binary heap, min/max extraction, task scheduling
 - **[std.PriorityDequeue](references/std-priority-dequeue.md)** - Min-max heap, double-ended priority extraction
@@ -988,15 +1359,15 @@ Load these references when working with specific modules:
 - **[std.heap](references/std-allocators.md)** - Allocator selection guide, ArenaAllocator, SafeAllocator, FixedBufferAllocator, MemoryPool, SmpAllocator, BufferFirstAllocator, custom allocator implementation
 
 ### I/O & Files
-- **[std.io](references/std-io.md)** - Reader/Writer API (0.15.x): buffered I/O, streaming, binary data, format strings
+- **[std.io](references/std-io.md)** - Reader/Writer API (introduced 0.15, valid in 0.17): buffered I/O, streaming, binary data, format strings
 - **[std.fs](references/std-fs.md)** - File system: files, directories, iteration, atomic writes, paths
 - **[std.tar](references/std-tar.md)** - Tar archive reading/writing, extraction, POSIX ustar, GNU/pax extensions
 - **[std.zip](references/std-zip.md)** - ZIP archive reading/extraction, ZIP64 support, store/deflate compression
 - **[std.compress](references/std-compress.md)** - Compression: DEFLATE (gzip, zlib), Zstandard, LZMA, LZMA2, XZ decompression/compression
 
 ### Networking
-- **[std.http](references/std-http.md)** - HTTP client/server, TLS, connection pooling, compression, WebSocket
-- **[std.net](references/std-net.md)** - TCP/UDP sockets, address parsing, DNS resolution
+- **[std.http](references/std-http.md)** - HTTP client/server, TLS (std TLS does not check that an issuer is a CA: pin the certificate), connection pooling, compression, WebSocket
+- **[std.net](references/std-net.md)** - std.net → std.Io.net migration: TCP and Unix sockets, address parsing, connecting by host name, stream I/O
 - **[std.Uri](references/std-uri.md)** - URI parsing/formatting (RFC 3986), percent-encoding/decoding, relative URI resolution
 
 ### Process Management
@@ -1007,7 +1378,7 @@ Load these references when working with specific modules:
 - **[std.c](references/std-c.md)** - C ABI types and libc bindings: platform-specific types (fd_t, pid_t, timespec), errno values, socket/signal/memory types, fcntl/open flags, FFI with C libraries
 
 ### Concurrency
-- **[std.Thread](references/std-thread.md)** - Thread spawning, Mutex, RwLock, Condition, Semaphore, WaitGroup, thread pools
+- **[std.Thread](references/std-thread.md)** - `Thread.spawn` and utilities; Io.Mutex/Condition/Event/Group replacements for the removed Thread.Mutex/RwLock/Condition/Semaphore/WaitGroup/Pool, pthread/futex fallbacks
 - **[std.atomic](references/std-atomic.md)** - Lock-free atomic operations: Value wrapper, fetch-and-modify (add/sub/and/or/xor), compare-and-swap, atomic ordering semantics, spin loop hints, cache line sizing
 
 ### Patterns & Best Practices
@@ -1017,7 +1388,7 @@ Load these references when working with specific modules:
 - **[Zig Patterns](references/patterns.md)** - **Load when writing new code or reviewing code quality.** Comprehensive best practices extracted from the Zig standard library: quick patterns (memory/allocators, file I/O, HTTP, JSON, testing, build system) plus idiomatic code patterns covering syntax (closures, context pattern, options structs, destructuring), polymorphism (duck typing, generics, custom formatting, dynamic/static dispatch), safety (diagnostics, error payloads, defer/errdefer, compile-time assertions), and performance (const pointer passing)
 - **[Production Patterns](references/production-patterns.md)** - **Load when building large-scale Zig systems or optimizing performance.** Real-world patterns from Bun, Ghostty, TigerBeetle: modular build systems, CPU feature locking, pre-allocated message pools, counting allocators, SIMD with scalar fallback, intrusive linked lists, cache-line aligned SoA, work-stealing thread pools, SmolStr (15-byte SSO), comptime string maps, EnumUnionType generation, VOPR fuzzing, snapshot testing, edge-biased fuzz generation, platform abstraction facades, Objective-C bridges, opaque C wrappers with RAII, packed struct bitfields, Result union types, radix sort, tournament trees
 - **[MCP Server Patterns](references/mcp-server-patterns.md)** - **Load when building MCP servers, LSP bridges, JSON-RPC services, or protocol translators in Zig.** Patterns from zig-mcp: newline-delimited vs Content-Length transport, thread-based request correlation with ResetEvent, arena-per-request memory, child process lifecycle with pipe ownership transfer, tool registry with function pointers, std.json.Stringify for manual JSON building, lazy document sync with double-check locking, graceful degradation, auto-reconnect on crash, comptime schema generation, file URI encoding, common serialization gotchas
-- **[Gotchas](references/zig-gotchas.md)** - **Load when debugging code that compiles but misbehaves, or before a release.** Traps found in production code, each with its 0.17.0 status: what 0.17 changed silently (@bitCast arrays, @hasDecl, containsAtLeastScalar, SafeAllocator RSS), tuple swap, generic struct identity, @intFromFloat range, cancellation behind Io.Reader, fiber contextSwitch, fuzz corpus length prefix, self-hosted vs LLVM backend, HashMap tombstones, byte-loop memcmp/secureZero, key schedules on the stack, build.zig.zon facts
+- **[Gotchas](references/zig-gotchas.md)** - **Load when debugging code that compiles but misbehaves, or before a release.** Traps found in production code, each with its 0.17 status (0.17.0-only ones marked fixed in 0.17.1): what 0.17 changed silently (@bitCast arrays, @hasDecl, containsAtLeastScalar, SafeAllocator RSS), tuple swap, generic struct identity, @intFromFloat range, a pointer into a by-value parameter, cancellation behind Io.Reader, a custom Io.Reader with only `stream` (one call per small read), fiber contextSwitch, fuzz corpus length prefix, self-hosted vs LLVM backend, allocRemaining limit, a struct holding a slice into its own field, byte-loop array/vector @bitCast, HashMap tombstones, byte-loop memcmp/secureZero, std.mem.find over secrets (Boyer-Moore-Horspool), ecdsa SecretKey.fromBytes without a range check, key schedules on the stack, build.zig.zon facts
 - **[Code Review](references/code-review.md)** - **Load when reviewing Zig code.** Systematic checklist organized by confidence level: ALWAYS FLAG (removed features, changed syntax, API changes), FLAG WITH CONTEXT (exception safety bugs, missing flush, allocator issues), SUGGEST (style improvements). Includes migration examples for 0.14/0.15 breaking changes
 
 ### Serialization
@@ -1052,14 +1423,18 @@ IDE support via Language Server Protocol. Provides autocomplete, go-to-definitio
 
 **Version matching rule:** Use ZLS release matching your Zig release (0.16.x ZLS for 0.16.x Zig). Nightly Zig needs nightly ZLS.
 
-**Zig 0.17.0: ZLS does not work.** The configurer/maker split removed the build-runner hook
-ZLS used; ZLS and Zig are moving it to the Build Server Protocol. Until a ZLS release supports
-0.17, compile (`zig build`) to see errors instead of relying on editor diagnostics.
+**Zig 0.17: ZLS 0.17.0 (released 2026-10-19), with regressions.** The configurer/maker split
+removed the build-runner hook ZLS used; most of it came back through the build system
+protocol, but per the ZLS 0.17.0 release notes (linked from https://github.com/zigtools/zls/releases/tag/0.17.0,
+issue zigtools/zls#3277) type resolution of package imports inside `build.zig` and of modules
+exported only with `b.addModule` (no compile step) regressed, and file watching on Windows
+misses external changes. When the editor cannot resolve an import, compile (`zig build`) for the
+real errors. (Not tried against 0.17.1 for this skill.)
 
 **Installation:** the user's decision — point them at https://github.com/zigtools/zls
 (releases, or the VS Code "Zig Language" extension, which bundles it); do not install it on
-their behalf. Pick the ZLS release that matches the project's Zig release; for 0.17.0 there is
-none yet.
+their behalf. Pick the ZLS release that matches the project's Zig release (ZLS 0.17.0 for Zig
+0.17.x).
 
 **Editor support:** VS Code, Neovim (nvim-lspconfig), Helix, JetBrains, Emacs (lsp-mode), Sublime Text, Kate.
 
@@ -1082,19 +1457,19 @@ Manage multiple Zig versions side-by-side. Useful for migrating between versions
 **Usage:**
 ```bash
 zigup fetch 0.16.0          # download without changing default
-zigup fetch 0.17.0          # download without changing default
+zigup fetch 0.17.1          # download without changing default
 zigup list                  # show installed versions
-zigup 0.17.0                # set as default
+zigup 0.17.1                # set as default
 zigup run 0.16.0 build      # run specific version without changing default
-zigup run 0.17.0 build test # test with specific version
+zigup run 0.17.1 build test # test with specific version
 zigup clean 0.16.0          # remove old version
 ```
 
 **Migration workflow:**
 ```bash
-zigup run 0.17.0 build 2>&1 | head -40  # try build with new version
+zigup run 0.17.1 build 2>&1 | head -40  # try build with new version
 # fix errors, re-run until clean
-zigup 0.17.0                              # promote to default
+zigup 0.17.1                              # promote to default
 ```
 
 ### anyzig (Version Manager)
@@ -1131,7 +1506,7 @@ zig any --help
 .{
     .name = .myproject,
     .version = "0.1.0",
-    .minimum_zig_version = "0.17.0",
+    .minimum_zig_version = "0.17.1",
     // ...
 }
 ```

@@ -25,7 +25,7 @@ jobs:
       - name: Install Zig
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
-          version: 0.17.0
+          version: 0.17.1
 
       # Reference binaries for the golden-diff suite (test/golden.sh): the
       # distro fping (5.1 on ubuntu-latest, the oldest supported reference)
@@ -92,6 +92,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
-          version: 0.17.0
+          version: 0.17.1
       - name: Fuzz (60s window, deterministic seeds)
         run: sh scripts/fuzz.sh 60

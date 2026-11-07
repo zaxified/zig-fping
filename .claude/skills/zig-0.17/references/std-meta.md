@@ -8,6 +8,7 @@ Comptime type introspection and manipulation utilities. Essential for generic pr
 |----------|---------|
 | `stringToEnum(T, str)` | Convert string to enum variant |
 | `@typeInfo(T)` | Field data (0.17: `std.meta.fields` is a compile error; `fieldNames`/`fieldInfo`/`fieldTypes` are deprecated) |
+| `declarations(T)` | 0.17: returns the declaration *names* (`[]const [:0]const u8`), not structs with `.name` |
 | `fieldIndex(T, name)` | Get field index by name |
 | `tags(T)` | Get all enum/error set values |
 | `Tag(T)` | Get tag type of enum/union |
@@ -74,6 +75,9 @@ const error_names = @typeInfo(MyError).error_set.error_names.?;
 ```
 
 ### Get Field Names
+
+In 0.17 `std.meta.fieldNames(T)` (deprecated) returns a slice, not an array: concatenating two
+results with `++` needs `comptime`. Prefer `@typeInfo(T).@"struct".field_names`.
 
 ```zig
 const names = @typeInfo(Point).@"struct".field_names;
@@ -276,6 +280,7 @@ std.meta.hasFn(S, "missing")     // false
 std.meta.hasMethod(S, "method")  // true
 std.meta.hasMethod(*S, "method") // true (through pointer)
 std.meta.hasMethod([]S, "method") // false (slice, not single pointer)
+// Both are built on @hasDecl (lib/std/meta.zig:845): since 0.17 only `pub` decls count.
 ```
 
 ### Check Unique Representation

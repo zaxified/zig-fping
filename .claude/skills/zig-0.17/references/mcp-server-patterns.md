@@ -180,6 +180,22 @@ const PendingRequest = struct {
     allocator: std.mem.Allocator,
 };
 
+/// On 0.17.0 `Io.Event.waitTimeout` can return `error.Timeout` on a spurious wakeup
+/// (#36912, fixed in 0.17.1), so a Timeout only counts once the event is still unset AND the
+/// deadline has passed. Harmless on 0.17.1. Compiled and run on 0.17.0.
+fn waitEvent(io: std.Io, event: *std.Io.Event, timeout: std.Io.Clock.Duration) error{ RequestTimeout, Canceled }!void {
+    const deadline: std.Io.Clock.Timestamp = .fromNow(io, timeout);
+    while (!event.isSet()) {
+        event.waitTimeout(io, .{ .deadline = deadline }) catch |err| switch (err) {
+            error.Timeout => {
+                if (event.isSet()) break;
+                if (deadline.durationTo(.now(io, deadline.clock)).raw.nanoseconds >= 0) return error.RequestTimeout;
+            },
+            error.Canceled => return error.Canceled,
+        };
+    }
+}
+
 pub const LspClient = struct {
     next_id: std.atomic.Value(i64) = std.atomic.Value(i64).init(1),
     pending: std.AutoHashMapUnmanaged(i64, *PendingRequest),
@@ -192,22 +208,35 @@ pub const LspClient = struct {
         const pending = try self.allocator.create(PendingRequest);
         pending.* = .{ .allocator = self.allocator };
 
-        { try self.pending_mutex.lock(io); defer self.pending_mutex.unlock(io);
-          try self.pending.put(self.allocator, id, pending); }
-        errdefer { self.pending_mutex.lockUncancelable(io); defer self.pending_mutex.unlock(io);
-                   _ = self.pending.remove(id); self.allocator.destroy(pending); }
+        {
+            // Covers a cancelled lock and a failed put; ends at the closing brace.
+            errdefer self.allocator.destroy(pending);
+            try self.pending_mutex.lock(io);
+            defer self.pending_mutex.unlock(io);
+            try self.pending.put(self.allocator, id, pending);
+        }
+        // Every path from here on (success, error, timeout) removes the map entry and
+        // frees `pending` (and a response nobody took). The reader thread must look up,
+        // fill AND `event.set(io)` while holding pending_mutex: once this defer has run
+        // the entry is gone, so a late reply finds nothing and must free its own data.
+        // (Compiled and run on 0.17.0, incl. a timeout followed by a late reply.)
+        defer {
+            self.pending_mutex.lockUncancelable(io);
+            defer self.pending_mutex.unlock(io);
+            _ = self.pending.remove(id);
+            if (pending.response) |r| self.allocator.free(r);
+            self.allocator.destroy(pending);
+        }
 
         const msg = try json_rpc.writeRequest(allocator, .{ .integer = id }, method, params);
         defer allocator.free(msg);
         try LspTransport.writeMessage(stdin, io, msg);
 
-        // Block with 30s timeout
-        pending.event.waitTimeout(io, .{ .duration = .{ .raw = .fromSeconds(30), .clock = .awake } }) catch {
-            // Cleanup and return timeout error
-            return error.RequestTimeout;
-        };
+        // Block with 30s timeout (see waitEvent above)
+        try waitEvent(io, &pending.event, .{ .raw = .fromSeconds(30), .clock = .awake });
 
         const response = pending.response orelse return error.NoResponse;
+        pending.response = null; // taken: the defer above must not free it again
         defer self.allocator.free(response);
         return try allocator.dupe(u8, response);  // Dupe to caller's allocator
     }
@@ -217,7 +246,8 @@ pub const LspClient = struct {
         while (self.running.load(.acquire)) {
             const data = reader.readMessage(self.allocator) catch { self.signalAllPending(io); return; };
             if (data == null) { self.signalAllPending(io); return; }
-            // Parse, extract "id", lookup pending, set response, event.set(io)
+            // Parse, extract "id"; then, holding pending_mutex: lookup pending, set
+            // response, event.set(io). No entry found (late reply): free the data.
         }
     }
 };

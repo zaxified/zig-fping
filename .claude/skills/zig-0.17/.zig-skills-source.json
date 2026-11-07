@@ -1,16 +1,16 @@
 {
   "repository": "https://github.com/zaxified/zig-skills",
-  "tag": "v0.17.0-r1",
-  "commit": "718e23da339b2e9bd1a829f1f206e14aab6cba34",
-  "content_id": "d1a428f63a773eb072febd947144b6fe7846ee39d81c8ae3a660aac3f50a0ae4",
+  "tag": "v0.17.1-r1",
+  "commit": "87c299c3448e7bb09750d7de48d326d1f076d43b",
+  "content_id": "950bd509844bccba6d818a5fa0bf0b2e7554022b676aec337bd50894fa7cb911",
   "files": [
     {
       "path": "SKILL.md",
-      "sha256": "973a9d601b8dcfe4d34d4b89e486ce9fa7601119a213cbb8e2cc43a03a72db7f"
+      "sha256": "069f1b077f88943d9451ec8ecf8409f50b28b78cd2d65bb6f2b852c2c97a78d6"
     },
     {
       "path": "references/builtins.md",
-      "sha256": "62ffa72e4b8dd9ec372c1fe29e3599f205710460e716b9212cf566c30679110e"
+      "sha256": "d7c9a1f2c57d91bf46bedf424834b1fc8063f813fe4394945e58d05b2db21c46"
     },
     {
       "path": "references/c-interop.md",
@@ -18,11 +18,11 @@
     },
     {
       "path": "references/code-review.md",
-      "sha256": "fb14bf45d83fb06ad7a9737ed52b9245768e913c4633b6a8fead81be7486a4ee"
+      "sha256": "aa420d4d57595a036da164ba6c29974b9e6a881f9df5157cd7991477b093f271"
     },
     {
       "path": "references/comptime.md",
-      "sha256": "b15d6cd05b8d2d3366659fdf143e1da0217be2946339f23b986094ce6c194ac0"
+      "sha256": "c6381974672c6a8267be0082df9aafdffb73faac016072e112d0e3423a8127e6"
     },
     {
       "path": "references/data-oriented-design.md",
@@ -30,31 +30,31 @@
     },
     {
       "path": "references/language.md",
-      "sha256": "38ca70dc721393aae809348ddc21ffa9d0124fd254c72005124a2be7dcede3ae"
+      "sha256": "175859353a1110fb36896029709219ef8bf9327a34b833448649ee525f6e5efa"
     },
     {
       "path": "references/mcp-server-patterns.md",
-      "sha256": "f604193311d9714881a59280fe6396546eaaeb2b56d06365a536878bf62721e7"
+      "sha256": "1c5fb20c7869831c158f1e2935162aba95c6817d855547524cb2d77c6a71b9e7"
     },
     {
       "path": "references/patterns.md",
-      "sha256": "23c6960871d8d9a55fcc4a86ea3892572898e88d2f46ffde28986bd2342d34f3"
+      "sha256": "099d8fb9f5180907e594ba5362aa2aad0ac9c65fec8b89d83ba25ee3f1533f2f"
     },
     {
       "path": "references/production-patterns.md",
-      "sha256": "1baa7117d06ace9f8821586dee948b0bb53f5cd1e3c409d39bd7a08a899ea841"
+      "sha256": "fcadde85f566649e6928c58dc0b0a2c82c69c5ee2466c15e7e9f5de7df87d661"
     },
     {
       "path": "references/quality-tooling.md",
-      "sha256": "5b04cc12de736c5fac0e4f7ab19e0845d79abdb3cf739e5c6e4a02a4a3889ab5"
+      "sha256": "a29e348662581bc884d3409e2f9976976635dbe969023bbb80d417442fbe663f"
     },
     {
       "path": "references/simd-intrinsics.md",
-      "sha256": "a8aaa685a3ade2549f5306c1fb82e5bb13fc17642486961690720a582780f9de"
+      "sha256": "cdf9ae21120523991298626947a7b63f2079e8869b283ade02cad23144ea6124"
     },
     {
       "path": "references/std-allocators.md",
-      "sha256": "068509cd3946e2c974548171910e57637255d89917e7267df4aa63dae47945d5"
+      "sha256": "ac81877e6748e1b707c5a5008399db5fab387a798f63cdff49277b610e620300"
     },
     {
       "path": "references/std-array-hash-map.md",
@@ -70,7 +70,7 @@
     },
     {
       "path": "references/std-atomic.md",
-      "sha256": "761d71be7c575aaf779d137642ff82b040ca0d5d2fb7c881bc3534a3a41f94b9"
+      "sha256": "44b5e1643506af49ce8c54f9ec37c9c908d8f9ed4a44d35623faf67e260963c9"
     },
     {
       "path": "references/std-base64.md",
@@ -86,19 +86,19 @@
     },
     {
       "path": "references/std-build.md",
-      "sha256": "844dd3254c46c729601479381583b47a50cba578c3f8b04a1aeb9e7168ad2b7b"
+      "sha256": "94f98bd2758a31920b42a1b227e476280ef80caff356312b57233cb781f29761"
     },
     {
       "path": "references/std-c.md",
-      "sha256": "a7142a9ffa1740de8b8c2efe5bdcad95cc8aef83d3c06e9f6a0906fc4af53e69"
+      "sha256": "1d117ccf7ecdc83e955959fbb8655043f3f727f020d7bff2503a353e88ff23ed"
     },
     {
       "path": "references/std-compress.md",
-      "sha256": "c4b5c1b07157faac70c1a54e23d75c31c3d17b0bb4b97d5e479eca7952069443"
+      "sha256": "876dcb56565281e3014ba33fcfbe363fdef43265e401d0dc941c8f1fc08c75d0"
     },
     {
       "path": "references/std-crypto.md",
-      "sha256": "62de6347805f926d1fc869b747062e7a0466cb2aeaabbcc6bc06010415b705ee"
+      "sha256": "b94058ccf2000ab92fab67512e747e5cd15a442e4ef56a77d570e1c8e81ed95a"
     },
     {
       "path": "references/std-debug.md",
@@ -110,15 +110,15 @@
     },
     {
       "path": "references/std-fmt.md",
-      "sha256": "1ea0b48512ac061ea7522cd43dff457888b2c0b2589f8e10791453df4d75d921"
+      "sha256": "c8ae3f985d9823b426cd6fadc8d3e6f4159b69fff609f345b109d1f0efc3d3e2"
     },
     {
       "path": "references/std-fs.md",
-      "sha256": "d1e6a26d9baed05db804e9d7e51c1b71cd79f828031746a5a0dff5ed107e5f9e"
+      "sha256": "03c47d1eca08f1bfaa9989f0f858093b3840289007be6ace6fe85b3641d8c79b"
     },
     {
       "path": "references/std-hash.md",
-      "sha256": "9fc4eb3f72fd1a278e6cdb77b9bfb6fb78f3468a61d0a6b78561cd3c62b0541d"
+      "sha256": "3ea694e7b1b01b3cd3df892de59d6061685c59bf2588433e92024f274981becc"
     },
     {
       "path": "references/std-hashmap.md",
@@ -126,15 +126,15 @@
     },
     {
       "path": "references/std-http.md",
-      "sha256": "4d43b89d552524ccf05400e1bf63233f72daa4548e6e07822e63c468735ce988"
+      "sha256": "958fd0bfd32ab60bddef366b017ac99e832b1c36dd203f530ff26a7a71e2ff11"
     },
     {
       "path": "references/std-io.md",
-      "sha256": "633e938a2221c82373179a2b0ef9ca7ad9c8a510372069eaa3a9177699358399"
+      "sha256": "235d52f45ad83eee560a0a081542e4728494c324dec5fb7741f24c03665234ed"
     },
     {
       "path": "references/std-json.md",
-      "sha256": "bcbce4775786252edb7b0de4631e28df0e48d58abef74c0e50253a2ae462dd94"
+      "sha256": "b37ee8afe8487c028459b404c5e1e68b34e25ca5161e7366951569e4393057ad"
     },
     {
       "path": "references/std-linked-list.md",
@@ -154,7 +154,7 @@
     },
     {
       "path": "references/std-meta.md",
-      "sha256": "9269e9c871409af1efaeb3580753c760eb08cf6b386d54e8e69467b97b817d90"
+      "sha256": "470353494c5748b27ca2cd7e7b4ce3bd7a10400ec01c42a1032fb5afad1f1189"
     },
     {
       "path": "references/std-multi-array-list.md",
@@ -162,11 +162,11 @@
     },
     {
       "path": "references/std-net.md",
-      "sha256": "2606d6ba9f92caa2c0a96dd2f992c6a66c21f6ff71e18d50c45ee8d487071437"
+      "sha256": "7907a9365d3a943dd041ad8328fef5046c3370721f1f27949828876ea16dd3cf"
     },
     {
       "path": "references/std-os.md",
-      "sha256": "0b7944d1900d1339ae36afe765e9e001cff66d35967e7cc041877b6a1cdced26"
+      "sha256": "5869670aa1cfef16c8b3f65fa6a9e01b6c13ec8466342e1ef4aeec2e3465407a"
     },
     {
       "path": "references/std-priority-dequeue.md",
@@ -178,7 +178,7 @@
     },
     {
       "path": "references/std-process.md",
-      "sha256": "b2993da18122087272ffbf8d7a56b1ca7bebed999381d3a53e7ef04f2a0c4ef9"
+      "sha256": "097b1acdc776794c9d451896ce0efaf10b5cb53768173fcc4e80b1d0c0bf5667"
     },
     {
       "path": "references/std-random.md",
@@ -202,15 +202,15 @@
     },
     {
       "path": "references/std-tar.md",
-      "sha256": "37263fd32a5922fceecbdb70eaedea48d2b36ac54251761d13564337d7832349"
+      "sha256": "5f409db1fee909d47bc96a306b41b155013d62ceb4b650b2fc6f82c1927b7238"
     },
     {
       "path": "references/std-testing.md",
-      "sha256": "a725ad2a9d329fd1584725dece306ee04fc8d828ad72cd47718d11942ba72b51"
+      "sha256": "2e7e2f9d5345b8c14811f6bb7cfc43d7d9e05b7b3ae133ae27232c0ef69e821e"
     },
     {
       "path": "references/std-thread.md",
-      "sha256": "0b0b56e1f72d696485fce464ba13efe22425b203c903228d1b9c42630a5381fe"
+      "sha256": "cdc84933f48e3ff9c17fd80ef37424e5b55778b31cb6e2145f56edb360679c76"
     },
     {
       "path": "references/std-time.md",
@@ -230,19 +230,19 @@
     },
     {
       "path": "references/std-uri.md",
-      "sha256": "60331145daff31ea8f8e2169dc73f2ba01af34a2534d2771236ed5840ed1d7e5"
+      "sha256": "d16ea35c462c72cb61bc00348e94a3eb2decd582c1dab5bbabee59ae324281cf"
     },
     {
       "path": "references/std-zig.md",
-      "sha256": "a0de839c255d56e201e9fdbdaece27ac105842c5929bdd65ebb405e85f0f3b9c"
+      "sha256": "96b311c904ec8da55bbc0c6d36b0c6ce9c86ae790f85f9e64f3ac1f9883f39f3"
     },
     {
       "path": "references/std-zip.md",
-      "sha256": "82056daa2d955cd0c03504ca96c2adf1b390bff08ea587354677ebd9df62a016"
+      "sha256": "3da086c6f2044b24e2a7e20944fe6dde40437afdbccc0c52c17bb602279f5788"
     },
     {
       "path": "references/std-zon.md",
-      "sha256": "eafb18df87ac2aac117750116a57667d7e6b0eb85a4dbe9acebafad7359c50d5"
+      "sha256": "7aa051b5332ee8df073f38af0532b4cb436e264ed803e48531b35805f70ee5df"
     },
     {
       "path": "references/style-guide.md",
@@ -250,7 +250,7 @@
     },
     {
       "path": "references/zig-gotchas.md",
-      "sha256": "ff26fc806721f1f9fe7e679d469072d861dd9e700a7bb858fe61beee043e0ebc"
+      "sha256": "3689033d0654f8cad89bf79be92ef688248cb1cd11e677c6da0b57ae7136f375"
     }
   ]
 }

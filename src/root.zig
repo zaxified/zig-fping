@@ -21,7 +21,16 @@
 //! const st = pinger.stats(id);
 //! ```
 
+const builtin = @import("builtin");
 const pinger = @import("pinger.zig");
+
+// Zig 0.17.0 miscompiles signed -> narrower unsigned @intCast in optimized
+// builds (ziglang/zig#37131, fixed in 0.17.1). `minimum_zig_version` in
+// build.zig.zon is not enforced by Zig, so the package refuses 0.17.0 here.
+comptime {
+    if (builtin.zig_version.order(.{ .major = 0, .minor = 17, .patch = 1 }) == .lt)
+        @compileError("zig-fping requires Zig 0.17.1 or later (ziglang/zig#37131)");
+}
 
 pub const Pinger = pinger.Pinger;
 pub const Config = pinger.Config;

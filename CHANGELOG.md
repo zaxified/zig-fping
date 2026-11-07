@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Zig 0.17.1
+
+The package now requires **Zig 0.17.1** (`.zigversion`,
+`minimum_zig_version`, CI and release workflows, pinned tarball SHA256 in
+`scripts/zig-env.sh`). Zig 0.17.0 lowers a signed-to-narrower-unsigned
+`@intCast` to LLVM `trunc nsw` (ziglang/zig#37131), which lets optimized
+builds fold away range checks on values in the upper half of the destination
+type. Zig does not enforce `minimum_zig_version`, so `src/root.zig` refuses
+to compile with anything older than 0.17.1. No source changes were needed
+otherwise. The vendored `zig-0.17` skill moves to zig-skills `v0.17.1-r1`.
+
 ### fping-watch moved out
 
 The example application `example-apps/fping-watch` has left this repository,

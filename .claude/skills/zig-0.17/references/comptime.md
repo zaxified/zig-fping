@@ -81,7 +81,7 @@ const config = parseConfig(@embedFile("config.json"));
 | `@Int`, `@Struct`, `@Union`, `@Enum`, `@Pointer`, `@Fn`, `@Tuple` | Create a type (inverse of `@typeInfo`; `@Type` is gone since 0.16) |
 | `@TypeOf(expr)` | Get type of expression |
 | `@typeName(T)` | Get type name as `[:0]const u8` |
-| `@hasDecl(T, name)` | Check if type has declaration |
+| `@hasDecl(T, name)` | Check if type has a `pub` declaration (0.17: non-`pub` decls are invisible) |
 | `@hasField(T, name)` | Check if type has field |
 | `@field(value, name)` | Access field by comptime-known name |
 
@@ -158,11 +158,13 @@ fn hasField(comptime T: type, comptime name: []const u8) bool {
 
 // Computation in comptime block
 fn sumComptime(comptime values: []const i32) i32 {
-    comptime {
+    // `comptime { ...; return x; }` does NOT compile when called from runtime code
+    // ("function called at runtime cannot return value at comptime"); use a labeled block.
+    return comptime blk: {
         var sum: i32 = 0;
         for (values) |v| sum += v;
-        return sum;
-    }
+        break :blk sum;
+    };
 }
 ```
 
