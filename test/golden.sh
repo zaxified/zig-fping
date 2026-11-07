@@ -195,6 +195,7 @@ golden "timestamp -D"           full -D -c 1 127.0.0.1
 golden "payload size -b"        full -b 120 -c 1 127.0.0.1
 golden "generate range"         full -g 192.0.2.1 192.0.2.3 -r 0 -t 100 -u
 golden "generate CIDR"          full -g 192.0.2.0/30 -r 0 -t 100 -u
+golden "IPv4-tail targets -A"   full -A -r 0 -t 100 -u ::192.0.2.1 2001:db8::1.2.3.4
 golden "reachable met -x"       full -x 1 -r 0 -t 100 127.0.0.1 192.0.2.9
 golden "reachable unmet -x"     full -x 2 -r 0 -t 100 127.0.0.1 192.0.2.9
 golden "unknown host"           full -t 100 nonexistent.invalid.zzz
@@ -246,6 +247,9 @@ if ref_ge 5 5; then
     golden "v5.5 -H above 255"      full -H 256 127.0.0.1
     golden "v5.5 -H zero"           rc   -H 0 127.0.0.1
     golden "v5.5 -B above max"      full -B 6 127.0.0.1
+    # IPv6 -g arrived in fping 5.5; generated names are printed in glibc
+    # inet_ntop form (NAT64 tail as hex words, not dotted).
+    golden "v5.5 -g NAT64 CIDR"     full -g 64:ff9b::192.0.2.0/126 -r 0 -t 100 -u
     golden "v5.5 -a with -u"        full -a -u 127.0.0.1
     golden "v5.5 -k bad mark"       rc   -k abc 127.0.0.1
     golden "v5.5 -k fwmark"         full -k 5 -c 1 127.0.0.1

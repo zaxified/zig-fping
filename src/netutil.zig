@@ -139,6 +139,92 @@ pub fn sortWithReachability(
     }
 }
 
+/// Write an IPv6 address the way glibc's inet_ntop(AF_INET6) does, which is
+/// what fping prints. std's Ip6Address formatter is not used: it differs
+/// from glibc for IPv4-compatible addresses (`::192.0.2.1`, std prints
+/// `::c000:201`) and, since Zig 0.17.1, for the NAT64 prefix (`64:ff9b::/96`,
+/// std prints `64:ff9b::192.0.2.1`, glibc `64:ff9b::c000:201`).
+///
+/// Rules (glibc resolv/inet_ntop.c, inet_ntop6): the longest run of two or
+/// more zero words becomes "::" (the first one on a tie); the last 32 bits
+/// are written as dotted IPv4 only when the run starts at word 0 and is
+/// exactly 6 words long (`::a.b.c.d`) or 5 words followed by 0xffff
+/// (`::ffff:a.b.c.d`); hex words are lowercase without leading zeros.
+pub fn formatIp6(bytes: *const [16]u8, w: *std.Io.Writer) std.Io.Writer.Error!void {
+    var words: [8]u16 = undefined;
+    for (&words, 0..) |*word, i| word.* = std.mem.readInt(u16, bytes[2 * i ..][0..2], .big);
+
+    // Longest zero run; `best_len < 2` means no compression.
+    var best_base: usize = 0;
+    var best_len: usize = 0;
+    var cur_len: usize = 0;
+    for (words, 0..) |word, i| {
+        if (word == 0) {
+            cur_len += 1;
+            if (cur_len > best_len) {
+                best_len = cur_len;
+                best_base = i + 1 - cur_len;
+            }
+        } else cur_len = 0;
+    }
+    if (best_len < 2) best_len = 0;
+
+    var i: usize = 0;
+    while (i < words.len) : (i += 1) {
+        if (best_len != 0 and i == best_base) {
+            try w.writeAll(if (i == 0) "::" else ":");
+            i += best_len - 1;
+            continue;
+        }
+        if (i == 6 and best_len != 0 and best_base == 0 and
+            (best_len == 6 or (best_len == 5 and words[5] == 0xffff)))
+        {
+            try w.print("{d}.{d}.{d}.{d}", .{ bytes[12], bytes[13], bytes[14], bytes[15] });
+            return;
+        }
+        try w.print("{x}", .{words[i]});
+        if (i != words.len - 1) try w.writeAll(":");
+    }
+}
+
+test "formatIp6 matches glibc inet_ntop" {
+    // Expected strings are glibc 2.39 output: python3
+    // `socket.inet_ntop(AF_INET6, socket.inet_pton(AF_INET6, input))`.
+    const cases = [_][2][]const u8{
+        .{ "::", "::" },
+        .{ "::1", "::1" },
+        .{ "::2", "::2" },
+        .{ "::ffff:0:0", "::ffff:0.0.0.0" },
+        .{ "::ffff:192.0.2.1", "::ffff:192.0.2.1" },
+        .{ "::192.0.2.1", "::192.0.2.1" },
+        .{ "::7f00:1", "::127.0.0.1" },
+        .{ "::0.0.1.0", "::100" },
+        .{ "::1:0:0:0", "::1:0:0:0" },
+        .{ "64:ff9b::192.0.2.1", "64:ff9b::c000:201" },
+        .{ "64:ff9b:1::192.0.2.1", "64:ff9b:1::c000:201" },
+        .{ "2001:db8::1", "2001:db8::1" },
+        .{ "2001:db8:0:0:1:0:0:1", "2001:db8::1:0:0:1" },
+        .{ "2001:0:0:1:0:0:0:1", "2001:0:0:1::1" },
+        .{ "1:0:0:0:0:0:0:0", "1::" },
+        .{ "0:0:0:0:0:1:0:0", "::1:0:0" },
+        .{ "1:2:3:4:5:6:7:8", "1:2:3:4:5:6:7:8" },
+        .{ "fe80::1", "fe80::1" },
+        .{ "::ffff:1:2", "::ffff:0.1.0.2" },
+        .{ "::fffe:1.2.3.4", "::fffe:102:304" },
+        .{ "1:0:1:0:1:0:1:0", "1:0:1:0:1:0:1:0" },
+        .{ "0:1:0:0:1:0:0:0", "0:1:0:0:1::" },
+        .{ "0:0:0:0:1:ffff:1.2.3.4", "::1:ffff:102:304" },
+        .{ "abcd:ef01:2345:6789:abcd:ef01:2345:6789", "abcd:ef01:2345:6789:abcd:ef01:2345:6789" },
+    };
+    for (cases) |c| {
+        const ip = try std.Io.net.Ip6Address.parse(c[0], 0);
+        var buf: [64]u8 = undefined;
+        var w: std.Io.Writer = .fixed(&buf);
+        try formatIp6(&ip.bytes, &w);
+        try std.testing.expectEqualStrings(c[1], w.buffered());
+    }
+}
+
 test "policy precedence follows RFC 6724 table" {
     try std.testing.expectEqual(@as(u8, 50), policyPrecedence(try .parse("::1")));
     try std.testing.expectEqual(@as(u8, 40), policyPrecedence(try .parse("2606:4700::1111")));

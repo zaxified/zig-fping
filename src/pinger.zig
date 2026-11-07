@@ -283,17 +283,7 @@ pub const Addr = union(icmp.Family) {
                 const b = std.mem.toBytes(sa.addr);
                 try w.print("{d}.{d}.{d}.{d}", .{ b[0], b[1], b[2], b[3] });
             },
-            .v6 => |sa| {
-                const ip6: std.Io.net.Ip6Address = .{ .port = 0, .bytes = sa.addr };
-                var buf: [64]u8 = undefined;
-                var fixed: std.Io.Writer = .fixed(&buf);
-                ip6.format(&fixed) catch unreachable;
-                var text = fixed.buffered();
-                // Ip6Address.format renders "[addr]:port"; keep only addr.
-                if (std.mem.findScalarLast(u8, text, ']')) |close| text = text[0..close];
-                if (text.len > 0 and text[0] == '[') text = text[1..];
-                try w.writeAll(text);
-            },
+            .v6 => |sa| try netutil.formatIp6(&sa.addr, w),
         }
     }
 };
@@ -1096,6 +1086,24 @@ test "addr parse and subnet keys" {
     try std.testing.expect(x.subnetKey() != z.subnetKey());
 
     try std.testing.expectError(error.InvalidAddress, Addr.parse("not-an-ip"));
+}
+
+test "addr parse accepts IPv6 with an IPv4 tail, formats like inet_ntop" {
+    // Zig 0.17.0's IpAddress.parse rejected every IPv4 tail except ::ffff:
+    // (fixed in 0.17.1), so zfping refused NAT64 targets that fping accepts.
+    const cases = [_][2][]const u8{
+        .{ "64:ff9b::192.0.2.1", "64:ff9b::c000:201" },
+        .{ "::192.0.2.1", "::192.0.2.1" },
+        .{ "2001:db8::1.2.3.4", "2001:db8::102:304" },
+        .{ "::ffff:192.0.2.1", "::ffff:192.0.2.1" },
+    };
+    for (cases) |c| {
+        const a = try Addr.parse(c[0]);
+        var buf: [64]u8 = undefined;
+        var w: std.Io.Writer = .fixed(&buf);
+        try a.format(&w);
+        try std.testing.expectEqualStrings(c[1], w.buffered());
+    }
 }
 
 test "addr format and sameHost" {

@@ -2,6 +2,7 @@
 //! mirroring add_cidr/add_range from fping.c.
 
 const std = @import("std");
+const fping = @import("zig_fping");
 
 /// Maximum number of targets -g may generate (fping MAX_GENERATE).
 pub const max_generate = 131072;
@@ -51,15 +52,11 @@ fn appendV4(gpa: std.mem.Allocator, list: *std.ArrayList([]const u8), value: u32
 fn appendV6(gpa: std.mem.Allocator, list: *std.ArrayList([]const u8), value: u128, scope: []const u8) Error!void {
     var bytes: [16]u8 = undefined;
     std.mem.writeInt(u128, &bytes, value, .big);
-    const ip6: std.Io.net.Ip6Address = .{ .port = 0, .bytes = bytes };
     var buf: [64]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);
-    ip6.format(&w) catch unreachable;
-    var text = w.buffered();
-    // Ip6Address.format renders "[addr]:port"; keep only addr.
-    if (std.mem.findScalarLast(u8, text, ']')) |close| text = text[0..close];
-    if (text.len > 0 and text[0] == '[') text = text[1..];
-    const full = try gpa.print("{s}{s}", .{ text, scope });
+    // glibc inet_ntop form, like fping's -g output.
+    fping.netutil.formatIp6(&bytes, &w) catch unreachable; // 39 bytes at most
+    const full = try gpa.print("{s}{s}", .{ w.buffered(), scope });
     try list.append(gpa, full);
 }
 
@@ -181,6 +178,13 @@ test "cidr v6" {
     try std.testing.expectEqualStrings("2001:db8::", list.items[0]);
     try std.testing.expectEqualStrings("2001:db8::3", list.items[3]);
     try std.testing.expectError(error.InvalidMask, addCidr(gpa, &list, "2001:db8::/64"));
+
+    // NAT64 prefix with an IPv4 tail: parsed since Zig 0.17.1, printed in
+    // glibc inet_ntop form (hex words), as fping prints it.
+    const before = list.items.len;
+    try addCidr(gpa, &list, "64:ff9b::192.0.2.0/126");
+    try std.testing.expectEqualStrings("64:ff9b::c000:200", list.items[before]);
+    try std.testing.expectEqualStrings("64:ff9b::c000:203", list.items[before + 3]);
 }
 
 test "range v4 and limits" {
